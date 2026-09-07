@@ -1,0 +1,17 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - run: cargo +stable fmt --check
+      - run: cargo +stable clippy --all-targets --locked -- -D warnings
+      - run: cargo +stable test --locked
+      - run: docker build -t local/runnerctl-runner:2.337.0 runner
+      - run: docker build -t local/runnerctl-test:1 -f tests/Dockerfile .
+      - run: bash tests/entrypoint.sh
+      - run: cargo +stable test --locked docker_replacement_and_restart_recovery -- --ignored --nocapture

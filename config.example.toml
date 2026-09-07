@@ -1,0 +1,43 @@
+schema_version = 1
+
+[auth.eduvil]
+credential = "env:EDUVIL_RUNNER_PAT"
+
+[auth.partner]
+credential = "env:PARTNER_RUNNER_PAT"
+
+[manager]
+poll_interval_seconds = 30
+max_runners = 8
+max_parallel_creates = 2
+log_retention_days = 7
+
+[[pools]]
+name = "validate"
+organization = "eduvil-dev"
+auth = "eduvil"
+labels = ["validate"]
+runner_group = "Default"
+replicas = 4
+image = "local/runnerctl-runner:2.337.0"
+docker_socket = false
+
+[[pools]]
+name = "build"
+organization = "eduvil-dev"
+auth = "eduvil"
+labels = ["build"]
+runner_group = "Default"
+replicas = 2
+image = "local/runnerctl-runner:2.337.0"
+docker_socket = true
+
+[[pools]]
+name = "partner-test"
+organization = "example-partner"
+auth = "partner"
+labels = ["test"]
+runner_group = "Default"
+replicas = 1
+image = "local/runnerctl-runner:2.337.0"
+docker_socket = false
