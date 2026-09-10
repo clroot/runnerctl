@@ -7,7 +7,12 @@ A Rust CLI for managing multiple GitHub Actions runner pools on a single Linux D
 Requires Linux, Rust 1.85 or later, Docker Engine and CLI, and access to the Docker socket. A systemd user service is optional.
 
 ```bash
-cargo install --path . --locked
+# After the first release is published, install from crates.io.
+cargo install runnerctl --locked
+
+# Or install the current checkout during development.
+# cargo install --path . --locked
+
 # Build the image on the Docker host used by runnerctl.
 docker build -t local/runnerctl-runner:2.337.0 runner
 ```
@@ -123,9 +128,12 @@ See [tests/README.md](tests/README.md) for isolated tests using real Docker cont
 
 Start migration with one test runner using a new label. Verify your actual workflows and Docker usage, then stop existing Compose slots individually and increase the new pool's capacity. Adjust the existing recovery timer's management scope so it cannot recreate migrated runners, and disable it once migration is complete.
 
+## Publishing a release
+
+Maintainers commit the desired version in `Cargo.toml` and `Cargo.lock`, then create and publish a GitHub release for the matching `v<version>` tag. Publishing the release triggers the repository workflow, which checks the tag against `Cargo.toml`, runs formatting, clippy, tests and a publication dry run, then uploads the crate to crates.io. The repository's `CARGO_REGISTRY_TOKEN` secret is already configured; prerelease GitHub releases are rejected.
+
 ## References
 
 - [GitHub runner API and permissions](https://docs.github.com/en/rest/actions/self-hosted-runners)
 - [Ephemeral runners and update policies](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
 - [Job completion hooks](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts)
-- [Implementation plan (Korean)](PLAN.md)
