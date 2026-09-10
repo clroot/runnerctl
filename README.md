@@ -1,5 +1,10 @@
 # runnerctl
 
+[![crates.io](https://img.shields.io/crates/v/runnerctl.svg)](https://crates.io/crates/runnerctl)
+[![CI](https://github.com/clroot/runnerctl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/clroot/runnerctl/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![License](https://img.shields.io/crates/l/runnerctl.svg)](https://opensource.org/licenses/MIT)
+
 A Rust CLI for managing multiple GitHub Actions runner pools on a single Linux Docker host. Configure each pool's organization, authentication profile, labels, image, and capacity. The manager runs the official GitHub runner in ephemeral containers, removes containers after their jobs finish, and creates replacements.
 
 ## Requirements and installation
@@ -7,7 +12,7 @@ A Rust CLI for managing multiple GitHub Actions runner pools on a single Linux D
 Requires Linux, Rust 1.85 or later, Docker Engine and CLI, and access to the Docker socket. A systemd user service is optional.
 
 ```bash
-# After the first release is published, install from crates.io.
+# Install the latest published release from crates.io.
 cargo install runnerctl --locked
 
 # Or install the current checkout during development.
