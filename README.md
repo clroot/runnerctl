@@ -9,20 +9,35 @@ A Rust CLI for managing multiple GitHub Actions runner pools on a single Linux D
 
 ## Requirements and installation
 
-Requires Linux, Rust 1.85 or later, Docker Engine and CLI, and access to the Docker socket. A systemd user service is optional.
+Install and run `runnerctl` on the Linux host that will run your GitHub Actions runners. You need:
+
+- Rust and Cargo (Rust 1.85 or later; the current stable toolchain is recommended). Install them with [rustup](https://rustup.rs) if needed.
+- A C compiler and linker for building native dependencies during installation.
+- Docker Engine and CLI, with Docker running and your user able to access its socket.
+
+A systemd user service is optional.
+
+### Install from crates.io
+
+Install the latest published release from [crates.io](https://crates.io/crates/runnerctl):
 
 ```bash
-# Install the latest published release from crates.io.
 cargo install runnerctl --locked
-
-# Or install the current checkout during development.
-# cargo install --path . --locked
-
-# Build the image on the Docker host used by runnerctl.
-docker build -t local/runnerctl-runner:2.337.0 runner
+runnerctl --version
 ```
 
-The image build verifies the runner archive's SHA-256 checksum. To build another version, supply both the `RUNNER_VERSION` and architecture-specific `RUNNER_SHA256` build arguments, and use a matching image tag. Custom images must follow the image contract below.
+Cargo installs the binary into `~/.cargo/bin` by default. Make sure that directory (or `$CARGO_HOME/bin` if customized) is on your `PATH`. The `--locked` flag uses the release's pinned dependency versions. Run the same install command again to update to a newer release.
+
+### Build the runner image
+
+The CLI installation does not build the Docker image used by runner containers. Before continuing to the quick start, build the default image on the Docker host used by `runnerctl`. Docker can fetch the build files directly from the `v0.1.0` release:
+
+```bash
+docker build -t local/runnerctl-runner:2.337.0 \
+  'https://github.com/clroot/runnerctl.git#v0.1.0:runner'
+```
+
+This tag matches the CLI's default pool image. The image build verifies the runner archive's SHA-256 checksum. To build another runner version, supply both the `RUNNER_VERSION` and architecture-specific `RUNNER_SHA256` build arguments, and use a matching image tag. Custom images must follow the image contract below.
 
 ## Quick start
 
@@ -122,6 +137,17 @@ The default Dockerfile carries forward the Ubuntu, Git, and Docker CLI setup fro
 Custom images must handle `GITHUB_ORG`, `RUNNER_NAME`, `RUNNER_LABELS`, and `RUNNER_GROUP`, consume and remove `/run/runnerctl/token` during registration, and exit after one job. The completion hook must create `/run/runnerctl/completed`, and diagnostic files must be written to `/home/runner/actions-runner/_diag`. Extend `runner/Dockerfile` with additional build tools when possible.
 
 ## Testing and migration
+
+For development, clone the repository and install the local checkout instead of the published crate:
+
+```bash
+git clone https://github.com/clroot/runnerctl.git
+cd runnerctl
+cargo install --path . --locked
+docker build -t local/runnerctl-runner:2.337.0 runner
+```
+
+Run the checks from the repository root:
 
 ```bash
 cargo fmt --check
