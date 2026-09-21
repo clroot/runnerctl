@@ -1,11 +1,11 @@
 use crate::{
     config::{self, Config, Paths},
     docker::Docker,
-    github::Github,
+    github::{Github, RemoteRunner},
     protocol::{Request, Response},
-    state::{PoolState, Run, State, Store, now},
+    state::{PoolState, RetryScope, Run, State, Store, now},
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -19,6 +19,10 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 use uuid::Uuid;
+
+const UNEXPECTED_EXIT_ERROR: &str =
+    "runner exited before completing a job; inspect archived diagnostics";
+const MAX_RETRY_SECONDS: u64 = 600;
 
 pub fn hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
@@ -312,8 +316,27 @@ impl Engine {
                     checks.push(json!({"check":format!("github:{}",p.name),"ok":gh.is_ok(),"error":gh.err().map(|e|e.to_string())}));
                     let image = Docker::image(&p.image).await;
                     checks.push(json!({"check":format!("image:{}",p.name),"ok":image.is_ok(),"error":image.err().map(|e|e.to_string())}));
+                    let state = &self.state.pools[&p.name];
+                    let runs: Vec<&Run> = self
+                        .state
+                        .runs
+                        .values()
+                        .filter(|r| r.pool_id == state.id)
+                        .collect();
+                    let health = pool_health(&p, state, &runs, now());
+                    checks.push(json!({
+                        "check":format!("pool:{}",p.name),
+                        "ok":health.ok,
+                        "intent":if state.deleting {"deleting"} else if state.running {"running"} else {"stopped"},
+                        "replicas":p.replicas,
+                        "available":health.available,
+                        "unknown":health.unknown,
+                        "error":state.error,
+                        "retry_at":state.retry_at,
+                        "reasons":health.reasons,
+                    }));
                 }
-                Ok(json!({"healthy":checks.iter().all(|c|c["ok"]==true),"checks":checks}))
+                Ok(json!({"healthy":checks.iter().all(|c| c["ok"]==true),"checks":checks}))
             }
         }
     }
@@ -324,32 +347,59 @@ impl Engine {
         }
         let name = names[self.cursor % names.len()].clone();
         self.cursor = self.cursor.wrapping_add(1);
-        if self.state.pools[&name].retry_at > now() {
+        let at = now();
+        let retry_at = self.state.pools[&name].retry_at;
+        let retrying = retry_at > at;
+        if retrying && self.state.pools[&name].retry_scope == RetryScope::Observation {
             return Ok(());
         }
-        let result = self.reconcile(&name).await;
-        if let Err(error) = result {
-            let p = self
-                .state
-                .pools
-                .get_mut(&name)
-                .context("pool disappeared")?;
-            p.failures = p.failures.saturating_add(1);
-            p.retry_at = now()
-                + (5 * 2u64.pow(p.failures.min(7))).min(600)
-                + u64::from(Uuid::new_v4().as_bytes()[0] % 7);
-            p.error = Some(error.to_string());
-            // Last known busy/idle is not evidence after an observation failure.
-            for r in self.state.runs.values_mut().filter(|r| {
-                r.pool_id == p.id && matches!(r.phase.as_str(), "idle" | "busy" | "starting")
-            }) {
-                r.phase = "unknown".into();
+        // Unexpected exits delay provisioning, not observation or cleanup.
+        // Dependency failures still back off the entire reconciliation attempt.
+        let result = self
+            .reconcile(&name, replenishment_allowed(retry_at, at))
+            .await;
+        match result {
+            Ok(report) => {
+                if report.unexpected_exits > 0 {
+                    self.record_failure(&name, UNEXPECTED_EXIT_ERROR, RetryScope::Provisioning)?;
+                } else if !retrying {
+                    if let Some(p) = self.state.pools.get_mut(&name) {
+                        p.error = None;
+                        p.retry_at = 0;
+                    }
+                }
+            }
+            Err(error) => {
+                self.record_failure(&name, &error.to_string(), RetryScope::Observation)?;
+                if let Some(p) = self.state.pools.get(&name) {
+                    // Last known busy/idle is not evidence after an observation failure.
+                    let pool_id = p.id.clone();
+                    for r in self.state.runs.values_mut().filter(|r| {
+                        r.pool_id == pool_id
+                            && matches!(r.phase.as_str(), "idle" | "busy" | "starting")
+                    }) {
+                        r.phase = "unknown".into();
+                    }
+                }
             }
         }
         self.save()?;
         Ok(())
     }
-    async fn reconcile(&mut self, name: &str) -> Result<()> {
+    fn record_failure(&mut self, name: &str, error: &str, scope: RetryScope) -> Result<()> {
+        let at = now();
+        let p = self.state.pools.get_mut(name).context("pool disappeared")?;
+        if p.retry_at > at && p.retry_scope == scope {
+            return Ok(());
+        }
+        p.failures = p.failures.saturating_add(1);
+        let jitter = u64::from(Uuid::new_v4().as_bytes()[0] % 7);
+        p.retry_at = at.saturating_add(retry_delay(p.failures, jitter));
+        p.retry_scope = scope;
+        p.error = Some(error.to_owned());
+        Ok(())
+    }
+    async fn reconcile(&mut self, name: &str, allow_replenish: bool) -> Result<ReconcileReport> {
         let pool = self
             .state
             .config
@@ -359,6 +409,7 @@ impl Engine {
             .context("missing pool config")?
             .clone();
         let ps = self.state.pools[name].clone();
+        let mut report = ReconcileReport::default();
         let containers = Docker::list(&self.state.manager_id).await?;
         // An owned but unrecorded container counts against capacity and is never deleted blindly.
         let unknown_containers = containers
@@ -378,7 +429,7 @@ impl Engine {
                 self.state.pools.remove(name);
                 self.commit_config(next)?;
             }
-            return Ok(());
+            return Ok(report);
         }
         // Explicit force can stop local work even when the GitHub credential is revoked.
         let forced: Vec<Run> = self
@@ -446,6 +497,7 @@ impl Engine {
             }
         }
         self.save()?;
+        let mut cleanup_error: Option<anyhow::Error> = None;
         for id in ids {
             let mut run = self.state.runs[&id].clone();
             let remote = remotes.iter().find(|r| r.name == id);
@@ -458,12 +510,7 @@ impl Engine {
             let status = container.and_then(|c| c["State"]["Status"].as_str());
             if status == Some("running") || status == Some("restarting") || status == Some("paused")
             {
-                run.phase = match remote {
-                    Some(r) if r.busy => "busy",
-                    Some(r) if r.status == "online" => "idle",
-                    _ => "unknown",
-                }
-                .into();
+                run.phase = observed_phase(remote).into();
                 // Remove short-lived bootstrap secret after registration is observed.
                 if remote.is_some() {
                     let _ = fs::remove_file(self.paths.home.join("runs").join(&id).join("token"));
@@ -471,6 +518,10 @@ impl Engine {
                 self.state.runs.insert(id, run);
                 continue;
             } else if status == Some("created") && !run.retiring {
+                if !allow_replenish {
+                    self.state.runs.insert(id, run);
+                    continue;
+                }
                 // Token might have expired during manager downtime. Refresh before start.
                 let token = self
                     .github
@@ -486,6 +537,10 @@ impl Engine {
                 self.save()?;
                 continue;
             } else if container.is_none() && run.phase == "creating" && !run.retiring {
+                if !allow_replenish {
+                    self.state.runs.insert(id, run);
+                    continue;
+                }
                 // Generation was saved before Docker create; deterministic name recovers retries.
                 Docker::image(&run.pool.image).await?;
                 let dir = self.paths.home.join("runs").join(&id);
@@ -512,31 +567,49 @@ impl Engine {
                 run.phase = "cleanup".into();
                 self.state.runs.insert(id.clone(), run.clone());
                 self.save()?;
-                self.archive(&mut run, container).await?;
-                Docker::remove(&id, false).await?;
+                if let Err(error) = self.archive(&mut run, container).await {
+                    cleanup_error.get_or_insert(error);
+                    continue;
+                }
+                if let Err(error) = Docker::remove(&id, false).await {
+                    cleanup_error.get_or_insert(error);
+                    continue;
+                }
             }
             // No live container remains. Fresh lookup avoids leaving a registration that
             // appeared after the cached list (or a lost response from config.sh).
-            let fresh = self
+            let fresh = match self
                 .github
                 .list(&pool.auth, &auth, &pool.organization, 0)
-                .await?;
+                .await
+            {
+                Ok(fresh) => fresh,
+                Err(error) => {
+                    cleanup_error.get_or_insert(error);
+                    continue;
+                }
+            };
             if let Some(remote) = fresh.iter().find(|r| r.name == id) {
                 // No live local worker exists, so stale busy state cannot represent running work here.
-                self.github
+                if let Err(error) = self
+                    .github
                     .remove(&pool.auth, &auth, &pool.organization, remote.id)
-                    .await?;
+                    .await
+                {
+                    cleanup_error.get_or_insert(error);
+                    continue;
+                }
             }
             if run.completed_job {
                 self.state.pools.get_mut(name).unwrap().failures = 0;
             }
-            let failed = !run.completed_job && !run.retiring && !run.force;
+            report.note_exit(&run);
             self.state.runs.remove(&id);
             self.save()?;
             let _ = fs::remove_dir_all(self.paths.home.join("runs").join(&id));
-            if failed {
-                bail!("runner exited before completing a job; inspect archived diagnostics");
-            }
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error);
         }
         let active = self
             .state
@@ -550,10 +623,14 @@ impl Engine {
             next.pools.retain(|p| p.name != name);
             self.state.pools.remove(name);
             self.commit_config(next)?;
-            return Ok(());
+            return Ok(report);
         }
         let total = self.state.runs.len() + unknown_containers;
-        if active < keep && total < self.state.config.manager.max_runners as usize {
+        if allow_replenish
+            && report.unexpected_exits == 0
+            && active < keep
+            && total < self.state.config.manager.max_runners as usize
+        {
             // Only one create per pool turn; the single writer is below max_parallel_creates.
             Docker::image(&pool.image).await?;
             let id = format!(
@@ -577,12 +654,8 @@ impl Engine {
             self.state.runs.insert(id, run);
             self.save()?;
         }
-        if let Some(p) = self.state.pools.get_mut(name) {
-            p.error = None;
-            p.retry_at = 0;
-        }
         self.expire_logs()?;
-        Ok(())
+        Ok(report)
     }
     async fn archive(&mut self, run: &mut Run, container: &Value) -> Result<()> {
         if run.log_saved {
@@ -634,6 +707,78 @@ fn p_image(config: &Config, name: &str) -> String {
         .unwrap()
         .image
         .clone()
+}
+
+#[derive(Default)]
+struct ReconcileReport {
+    unexpected_exits: usize,
+}
+impl ReconcileReport {
+    fn note_exit(&mut self, run: &Run) {
+        if unexpected_exit(run) {
+            self.unexpected_exits += 1;
+        }
+    }
+}
+
+struct PoolHealth {
+    ok: bool,
+    available: usize,
+    unknown: usize,
+    reasons: Vec<String>,
+}
+
+fn retry_delay(failures: u32, jitter: u64) -> u64 {
+    let base = 5u64
+        .saturating_mul(1u64 << failures.min(7))
+        .min(MAX_RETRY_SECONDS);
+    base.saturating_add(jitter.min(6)).min(MAX_RETRY_SECONDS)
+}
+
+fn replenishment_allowed(retry_at: u64, at: u64) -> bool {
+    retry_at <= at
+}
+
+fn pool_health(pool: &config::Pool, state: &PoolState, runs: &[&Run], at: u64) -> PoolHealth {
+    let available = runs
+        .iter()
+        .filter(|r| matches!(r.phase.as_str(), "idle" | "busy"))
+        .count();
+    let unknown = runs.iter().filter(|r| r.phase == "unknown").count();
+    let managed = state.running && !state.deleting && pool.replicas > 0;
+    let mut reasons = vec![];
+    if managed {
+        if let Some(error) = &state.error {
+            reasons.push(format!("error: {error}"));
+        }
+        if state.retry_at > at {
+            reasons.push(format!("retry scheduled at {}", state.retry_at));
+        }
+        if unknown > 0 {
+            reasons.push(format!("{unknown} unknown runner(s)"));
+        }
+        if available < pool.replicas as usize {
+            reasons.push(format!("available capacity {available}/{}", pool.replicas));
+        }
+    }
+    PoolHealth {
+        ok: reasons.is_empty(),
+        available,
+        unknown,
+        reasons,
+    }
+}
+
+fn observed_phase(remote: Option<&RemoteRunner>) -> &'static str {
+    match remote {
+        Some(r) if r.busy => "busy",
+        Some(r) if r.status == "online" => "idle",
+        _ => "unknown",
+    }
+}
+
+fn unexpected_exit(run: &Run) -> bool {
+    !run.completed_job && !run.retiring && !run.force
 }
 
 pub async fn serve(paths: Paths) -> Result<()> {
@@ -708,6 +853,9 @@ pub async fn send(paths: &Paths, request: &Request) -> Result<Value> {
 }
 
 #[cfg(test)]
+mod recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn fixture() -> (tempfile::TempDir, Engine) {
@@ -736,6 +884,165 @@ mod tests {
         config::atomic_write(&paths.config(), toml::to_string(&c).unwrap().as_bytes()).unwrap();
         let e = Engine::open(paths).unwrap();
         (dir, e)
+    }
+    fn test_run(e: &Engine, pool: usize, phase: &str) -> Run {
+        Run {
+            id: format!("run-{pool}-{phase}"),
+            pool_id: e.state.pools[&e.state.config.pools[pool].name].id.clone(),
+            pool: e.state.config.pools[pool].clone(),
+            generation: 1,
+            created_at: now(),
+            phase: phase.into(),
+            remote_id: None,
+            retiring: false,
+            force: false,
+            completed_job: false,
+            log_saved: false,
+        }
+    }
+    #[test]
+    fn unexpected_exits_exclude_completed_retiring_and_forced_runs() {
+        let (_dir, e) = fixture();
+        let exited = test_run(&e, 0, "exited");
+        let exited_again = test_run(&e, 0, "exited");
+        let completed = Run {
+            completed_job: true,
+            ..exited.clone()
+        };
+        let retiring = Run {
+            retiring: true,
+            ..exited.clone()
+        };
+        let forced = Run {
+            force: true,
+            ..exited.clone()
+        };
+        let mut report = ReconcileReport::default();
+        for run in [&exited, &exited_again, &completed, &retiring, &forced] {
+            report.note_exit(run);
+        }
+        assert_eq!(report.unexpected_exits, 2);
+    }
+    #[test]
+    fn replenishment_backoff_is_bounded() {
+        assert_eq!(retry_delay(0, 0), 5);
+        assert!(retry_delay(3, 6) > retry_delay(2, 0));
+        assert_eq!(retry_delay(u32::MAX, 6), MAX_RETRY_SECONDS);
+        let at = 100;
+        assert!(!replenishment_allowed(at + 1, at));
+        assert!(replenishment_allowed(at, at));
+    }
+    #[tokio::test]
+    async fn dependency_backoff_survives_restart_and_skips_observation() {
+        let (_dir, mut e) = fixture();
+        e.record_failure(
+            "validate",
+            "dependency unavailable",
+            RetryScope::Observation,
+        )
+        .unwrap();
+        e.save().unwrap();
+        let deadline = e.state.pools["validate"].retry_at;
+        let paths = e.paths.clone();
+        drop(e);
+        let mut e = Engine::open(paths).unwrap();
+        e.cursor = 1; // BTreeMap order: build, validate.
+        e.tick().await.unwrap();
+        let p = &e.state.pools["validate"];
+        assert_eq!(p.retry_at, deadline);
+        assert_eq!(p.failures, 1);
+        assert_eq!(p.error.as_deref(), Some("dependency unavailable"));
+        assert!(p.retry_scope == RetryScope::Observation);
+    }
+    #[test]
+    fn provisioning_backoff_is_persisted_and_not_extended_by_more_exits() {
+        let (_dir, mut e) = fixture();
+        e.record_failure("validate", UNEXPECTED_EXIT_ERROR, RetryScope::Provisioning)
+            .unwrap();
+        let deadline = e.state.pools["validate"].retry_at;
+        e.record_failure("validate", UNEXPECTED_EXIT_ERROR, RetryScope::Provisioning)
+            .unwrap();
+        assert_eq!(e.state.pools["validate"].retry_at, deadline);
+        assert_eq!(e.state.pools["validate"].failures, 1);
+        e.save().unwrap();
+        let restored = Engine::open(e.paths.clone()).unwrap();
+        assert!(restored.state.pools["validate"].retry_scope == RetryScope::Provisioning);
+        e.record_failure("validate", "Docker unavailable", RetryScope::Observation)
+            .unwrap();
+        assert!(e.state.pools["validate"].retry_scope == RetryScope::Observation);
+        assert_eq!(e.state.pools["validate"].failures, 2);
+    }
+    #[test]
+    fn busy_capacity_is_healthy_but_unknown_or_missing_capacity_is_not() {
+        let (_dir, e) = fixture();
+        let mut pool = e.state.config.pools[0].clone();
+        pool.replicas = 1;
+        let mut state = e.state.pools[&pool.name].clone();
+        state.running = true;
+        let busy = test_run(&e, 0, "busy");
+        let health = pool_health(&pool, &state, &[&busy], now());
+        assert!(health.ok);
+        assert_eq!(health.available, 1);
+
+        state.error = Some("runner failure".into());
+        assert!(!pool_health(&pool, &state, &[&busy], now()).ok);
+        state.error = None;
+        state.retry_at = now() + 60;
+        assert!(!pool_health(&pool, &state, &[&busy], now()).ok);
+        state.retry_at = 0;
+
+        let unknown = test_run(&e, 0, "unknown");
+        let health = pool_health(&pool, &state, &[&busy, &unknown], now());
+        assert!(!health.ok);
+        assert_eq!(health.unknown, 1);
+
+        let mut pool = pool.clone();
+        pool.replicas = 2;
+        let health = pool_health(&pool, &state, &[&busy], now());
+        assert!(!health.ok);
+        assert!(
+            health
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("available capacity"))
+        );
+    }
+    #[test]
+    fn stopped_and_zero_replica_pools_are_not_degraded() {
+        let (_dir, e) = fixture();
+        let mut pool = e.state.config.pools[0].clone();
+        let mut state = e.state.pools[&pool.name].clone();
+        state.error = Some("old failure".into());
+        state.retry_at = now() + 60;
+        let unknown = test_run(&e, 0, "unknown");
+        assert!(pool_health(&pool, &state, &[&unknown], now()).ok);
+
+        state.running = true;
+        pool.replicas = 0;
+        assert!(pool_health(&pool, &state, &[&unknown], now()).ok);
+    }
+    #[test]
+    fn remote_observation_preserves_busy_state() {
+        let busy = RemoteRunner {
+            id: 1,
+            name: "runner".into(),
+            status: "offline".into(),
+            busy: true,
+        };
+        let idle = RemoteRunner {
+            status: "online".into(),
+            busy: false,
+            ..busy.clone()
+        };
+        let unknown = RemoteRunner {
+            status: "offline".into(),
+            busy: false,
+            ..busy.clone()
+        };
+        assert_eq!(observed_phase(Some(&busy)), "busy");
+        assert_eq!(observed_phase(Some(&idle)), "idle");
+        assert_eq!(observed_phase(Some(&unknown)), "unknown");
+        assert_eq!(observed_phase(None), "unknown");
     }
     #[tokio::test]
     async fn pool_stop_scale_and_restart_are_independent() {
