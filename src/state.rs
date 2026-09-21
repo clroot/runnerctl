@@ -31,7 +31,16 @@ pub struct PoolState {
     pub generation: u64,
     pub failures: u32,
     pub retry_at: u64,
+    #[serde(default)]
+    pub retry_scope: RetryScope,
     pub error: Option<String>,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryScope {
+    #[default]
+    Observation,
+    Provisioning,
 }
 impl Default for PoolState {
     fn default() -> Self {
@@ -42,6 +51,7 @@ impl Default for PoolState {
             generation: 1,
             failures: 0,
             retry_at: 0,
+            retry_scope: RetryScope::Observation,
             error: None,
         }
     }

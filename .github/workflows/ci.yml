@@ -14,4 +14,4 @@ jobs:
       - run: docker build -t local/runnerctl-runner:2.337.0 runner
       - run: docker build -t local/runnerctl-test:1 -f tests/Dockerfile .
       - run: bash tests/entrypoint.sh
-      - run: cargo +stable test --locked docker_replacement_and_restart_recovery -- --ignored --nocapture
+      - run: cargo +stable test --locked docker_ -- --ignored --nocapture

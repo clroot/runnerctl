@@ -58,7 +58,7 @@ runnerctl status
 
 PAT input is hidden at the terminal. For automation, use `auth login --profile NAME --token-stdin` or `--env VARIABLE`. Do not pass tokens as command arguments. Configuration stores only credential file or environment variable references. Credential files use mode `0600`, management directories use `0700`, and runner containers receive only short-lived registration tokens.
 
-A fine-grained PAT needs the target organization's **Self-hosted runners: Read and write** permission and any approval required by organization policy. `doctor` checks runner read access and local image availability; registration write access is checked when creating a runner. GitHub App authentication is planned for a later release.
+A fine-grained PAT needs the target organization's **Self-hosted runners: Read and write** permission and any approval required by organization policy. `doctor` checks runner read access, local image availability, and the observed health of running pools (errors, retry delays, unknown runners, and unavailable capacity). Intentionally stopped or zero-replica pools are not marked degraded; registration write access is checked when creating a runner. GitHub App authentication is planned for a later release.
 
 To run without a service, use `runnerctl manager` in the foreground. The CLI and manager must use the same `--home` directory. The default is `$XDG_CONFIG_HOME/runnerctl` or `~/.config/runnerctl`. When the manager is stopped, CLI configuration and intent changes are still saved under an exclusive lock, but container provisioning requires the manager to be running.
 
@@ -119,8 +119,8 @@ SQLite is the source of truth for applied configuration. If the process exits af
 
 - GitHub and Docker are polled periodically. Docker event streaming is not yet implemented.
 - API observation failures are reported as `unknown` and do not cause running containers to be deleted.
-- Authentication errors and rate limits are shared within an authentication profile. Failed pools retry with exponential backoff and jitter.
-- A runner that exits without completing a job is recorded as a failure. Normal completion requires both the completion hook and container exit.
+- Authentication errors and rate limits are shared within an authentication profile. Failed pools retry with bounded exponential backoff and jitter (at most 600 seconds). After runner exits, provisioning pauses during that delay while observation and cleanup continue; dependency failures pause reconciliation to avoid repeatedly hitting a failing Docker daemon or API. Retry scope and deadlines survive manager restarts.
+- A runner that exits without completing a job is recorded as a failure. All exited runners found in a reconciliation pass are cleaned before replacement is attempted. Normal completion requires both the completion hook and container exit.
 - Replacement containers receive new names and fresh filesystems, avoiding registration state left by container restarts.
 - A live but unresponsive process may remain `unknown`. Inspect its state and use an explicit `stop --force` followed by `start` if necessary.
 - Before deleting a container, the manager saves recent logs, up to 1 MiB, and a `_diag` archive, up to 32 MiB, in `<home>/logs`. Archive failure delays deletion and reports an error.
