@@ -377,3 +377,58 @@ async fn docker_tick_recovery_backoff_restart_and_doctor() {
     assert!(labels.contains(&live_id));
     assert!(labels.contains(&replacement_id));
 }
+
+#[tokio::test]
+#[ignore = "requires Docker and the local/runnerctl-test:1 image; see tests/README.md"]
+async fn docker_reboot_interrupted_exits_are_replaced_without_backoff() {
+    let (_dir, mut e) = fixture().unwrap();
+    let manager_id = e.state.manager_id.clone();
+    let prefix = &manager_id[..8];
+    let (base, _server) = github_server(format!("rc-{prefix}-none")).await;
+    e.github = Github::testing(base);
+    let _cleanup = DockerCleanup {
+        manager_id: manager_id.clone(),
+    };
+    e.handle(Request::Start {
+        pool: Some("recovery".into()),
+        all: false,
+    })
+    .await
+    .unwrap();
+
+    let ids = [format!("rc-{prefix}-boot-a"), format!("rc-{prefix}-boot-b")];
+    for id in &ids {
+        let run = test_run(&e, id, "idle");
+        e.state.runs.insert(id.clone(), run.clone());
+        controlled_container(&e.paths, &manager_id, &run, "exit 143")
+            .await
+            .unwrap();
+        exit_container(id).await.unwrap();
+    }
+    e.save().unwrap();
+    // The containers were started before the host "booted".
+    e.boot_time = Some(now() + 60);
+
+    e.tick().await.unwrap();
+    let pool = e.state.pools["recovery"].clone();
+    assert_eq!(pool.failures, 0);
+    assert_eq!(pool.retry_at, 0);
+    assert!(pool.error.is_none());
+    for id in &ids {
+        assert!(!e.state.runs.contains_key(id));
+        assert!(e.paths.home.join("logs").join(format!("{id}.log")).exists());
+    }
+    let replacement_id = e
+        .state
+        .runs
+        .keys()
+        .next()
+        .cloned()
+        .expect("interrupted runners are replaced in the same pass");
+    assert_eq!(e.state.runs[&replacement_id].phase, "creating");
+
+    e.tick().await.unwrap();
+    assert_eq!(e.state.runs[&replacement_id].phase, "starting");
+    let containers = Docker::list(&manager_id).await.unwrap();
+    assert_eq!(run_labels(&containers), vec![replacement_id]);
+}
