@@ -11,7 +11,7 @@ bash tests/entrypoint.sh
 cargo test --locked docker_ -- --ignored --nocapture
 ```
 
-The test image uses a local completion stub and never connects to GitHub. The manager uses a loopback HTTP fake for registration/list/delete. Containers are labeled with a randomly generated manager ID and cleaned up by the test guard. The tests verify two independent pools, job completion/replacement, manager state recovery, persistence of a stopped pool, and batch exit recovery during provisioning backoff without interrupting busy work.
+The test image uses a local completion stub and never connects to GitHub. The manager uses a loopback HTTP fake for registration/list/delete. Containers are labeled with a randomly generated manager ID and cleaned up by the test guard. The tests verify two independent pools, job completion/replacement, manager state recovery, persistence of a stopped pool, batch exit recovery during provisioning backoff without interrupting busy work, and immediate replacement of runners stopped by a host reboot.
 
 The entrypoint smoke test uses the production image with stubbed config/run scripts and networking disabled. It checks non-root execution, short-lived token consumption, ephemeral/update flags and completion hook permissions.
 

@@ -46,6 +46,7 @@ pub struct Engine {
     paths: Paths,
     github: Github,
     cursor: usize,
+    boot_time: Option<u64>,
 }
 impl Engine {
     pub fn open(paths: Paths) -> Result<Self> {
@@ -66,6 +67,7 @@ impl Engine {
             paths,
             github: Github::new()?,
             cursor: 0,
+            boot_time: host_boot_time(),
         })
     }
     fn save(&self) -> Result<()> {
@@ -508,6 +510,7 @@ impl Engine {
                 .iter()
                 .find(|c| Docker::owned(c, &self.state.manager_id, &run));
             let status = container.and_then(|c| c["State"]["Status"].as_str());
+            let interrupted = container.is_some_and(|c| started_before_boot(c, self.boot_time));
             if status == Some("running") || status == Some("restarting") || status == Some("paused")
             {
                 run.phase = observed_phase(remote).into();
@@ -603,7 +606,7 @@ impl Engine {
             if run.completed_job {
                 self.state.pools.get_mut(name).unwrap().failures = 0;
             }
-            report.note_exit(&run);
+            report.note_exit(&run, interrupted);
             self.state.runs.remove(&id);
             self.save()?;
             let _ = fs::remove_dir_all(self.paths.home.join("runs").join(&id));
@@ -714,8 +717,9 @@ struct ReconcileReport {
     unexpected_exits: usize,
 }
 impl ReconcileReport {
-    fn note_exit(&mut self, run: &Run) {
-        if unexpected_exit(run) {
+    fn note_exit(&mut self, run: &Run, interrupted: bool) {
+        // A host reboot stops every runner at once; that is not evidence of a broken image.
+        if unexpected_exit(run) && !interrupted {
             self.unexpected_exits += 1;
         }
     }
@@ -779,6 +783,25 @@ fn observed_phase(remote: Option<&RemoteRunner>) -> &'static str {
 
 fn unexpected_exit(run: &Run) -> bool {
     !run.completed_job && !run.retiring && !run.force
+}
+
+fn host_boot_time() -> Option<u64> {
+    fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())
+}
+
+// Containers use --restart=no, so one started before this boot was stopped by the reboot.
+fn started_before_boot(container: &Value, boot_time: Option<u64>) -> bool {
+    let (Some(boot_time), Some(started)) = (boot_time, container["State"]["StartedAt"].as_str())
+    else {
+        return false;
+    };
+    humantime::parse_rfc3339(started)
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|t| t.as_secs() < boot_time)
 }
 
 pub async fn serve(paths: Paths) -> Result<()> {
@@ -919,9 +942,31 @@ mod tests {
         };
         let mut report = ReconcileReport::default();
         for run in [&exited, &exited_again, &completed, &retiring, &forced] {
-            report.note_exit(run);
+            report.note_exit(run, false);
         }
+        report.note_exit(&exited, true);
         assert_eq!(report.unexpected_exits, 2);
+    }
+    #[test]
+    fn only_containers_started_before_boot_are_interrupted() {
+        let started = |at: &str| json!({"State":{"Status":"exited","StartedAt":at}});
+        // 2026-09-30T03:20:00Z
+        let boot = Some(1_790_738_400);
+        assert!(started_before_boot(
+            &started("2026-09-29T07:23:50.123456789Z"),
+            boot
+        ));
+        assert!(!started_before_boot(
+            &started("2026-09-30T03:20:36.5Z"),
+            boot
+        ));
+        assert!(!started_before_boot(&started("0001-01-01T00:00:00Z"), boot));
+        assert!(!started_before_boot(&started("not a time"), boot));
+        assert!(!started_before_boot(&json!({"State":{}}), boot));
+        assert!(!started_before_boot(&started("2026-09-29T07:23:50Z"), None));
+        if cfg!(target_os = "linux") {
+            assert!(host_boot_time().is_some_and(|b| b <= now()));
+        }
     }
     #[test]
     fn replenishment_backoff_is_bounded() {
