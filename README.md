@@ -30,11 +30,11 @@ Cargo installs the binary into `~/.cargo/bin` by default. Make sure that directo
 
 ### Build the runner image
 
-The CLI installation does not build the Docker image used by runner containers. Before continuing to the quick start, build the default image on the Docker host used by `runnerctl`. Docker can fetch the build files directly from the `v0.1.0` release:
+The CLI installation does not build the Docker image used by runner containers. Before continuing to the quick start, build the default image on the Docker host used by `runnerctl`. Docker can fetch the build files directly from the `v0.1.1` release:
 
 ```bash
 docker build -t local/runnerctl-runner:2.337.0 \
-  'https://github.com/clroot/runnerctl.git#v0.1.0:runner'
+  'https://github.com/clroot/runnerctl.git#v0.1.1:runner'
 ```
 
 This tag matches the CLI's default pool image. The image build verifies the runner archive's SHA-256 checksum. To build another runner version, supply both the `RUNNER_VERSION` and architecture-specific `RUNNER_SHA256` build arguments, and use a matching image tag. Custom images must follow the image contract below.
