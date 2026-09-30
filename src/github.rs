@@ -27,7 +27,7 @@ impl Github {
             client: Client::builder()
                 .timeout(Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent("runnerctl/0.1.0")
+                .user_agent(concat!("runnerctl/", env!("CARGO_PKG_VERSION")))
                 .build()?,
             base: "https://api.github.com".into(),
             cache: HashMap::new(),
