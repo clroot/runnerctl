@@ -19,8 +19,6 @@ build                octocat/project    running         1      1      0      1  
 
 The manager restores state after a restart, replaces completed runners, and preserves running jobs during normal stopping and upgrades. Capacity is configured per pool. This is a single-host manager for trusted workflows; pool labels and shared Docker access do not isolate tenants.
 
-> This checkout documents the upcoming **v0.2.0** release. Until that release is published, use the [development installation](#development) to try these changes. Published v0.1.x uses a locally built runner image.
-
 ## Install with Cargo
 
 On the Linux Docker host, install Rust/Cargo 1.85 or later and a C compiler/linker. Docker Engine must be running, and your user must be able to access its local socket.
