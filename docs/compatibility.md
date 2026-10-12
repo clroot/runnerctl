@@ -4,7 +4,7 @@ The bundled image is a small Ubuntu runner environment, not a copy of the GitHub
 
 ## Validation record
 
-On 2026-10-12, the upcoming runnerctl 0.2.0 with Actions runner 2.338.0 was exercised on Linux amd64 with Docker Engine 29.9.0. Tests used dedicated pools with unique labels, two replicas, and per-runner limits of one CPU and 1 GiB memory.
+On 2026-10-12, runnerctl 0.2.0 with Actions runner 2.338.0 was exercised on Linux amd64 with Docker Engine 29.9.0. Tests used dedicated pools with unique labels, two replicas, and per-runner limits of one CPU and 1 GiB memory.
 
 | Check | Organization runner | Repository runner |
 | --- | --- | --- |

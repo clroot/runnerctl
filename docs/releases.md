@@ -4,7 +4,7 @@ The CLI is distributed through crates.io. Runner images are distributed through 
 
 ## Publish
 
-1. Update `Cargo.toml` and `Cargo.lock` to the intended version, and remove the upcoming-release note from README when publishing v0.2.0. Check the development install and quick start.
+1. Update `Cargo.toml` and `Cargo.lock` to the intended version and prepare release notes. Check the development install and quick start.
 2. Run formatting, clippy, unit/CLI tests, Docker lifecycle/entrypoint tests, `python3 scripts/update-runner.py --check`, and the workflow compatibility suite. Review `cargo package --list` and perform `cargo publish --dry-run --locked`.
 3. Commit the release and publish a non-prerelease GitHub release for the matching `v<version>` tag.
 4. The publish workflow validates the tag and tests, builds/pushes Linux amd64 and arm64 images, and only then publishes the crate using `CARGO_REGISTRY_TOKEN`.
