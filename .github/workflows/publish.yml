@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the release tag
@@ -53,6 +53,38 @@ jobs:
       - name: Validate crate publication
         run: cargo +stable publish --dry-run --locked
 
+      - name: Validate runner image
+        run: |
+          python3 scripts/update-runner.py --check
+          docker build -t local/runnerctl-test-base:1 runner
+          docker build -t local/runnerctl-test:1 -f tests/Dockerfile .
+          bash tests/entrypoint.sh
+          cargo +stable test --locked docker_ -- --ignored --nocapture
+
+  image:
+    needs: validate
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/runner-image.yml
+    with:
+      tag: ${{ github.event.release.tag_name }}
+
+  publish:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - run: rustup toolchain install stable --profile minimal
+      - name: Verify the image is publicly pullable
+        env:
+          IMAGE_TAG: ${{ github.event.release.tag_name }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/anonymous-docker"
+          docker --config "$RUNNER_TEMP/anonymous-docker" manifest inspect "ghcr.io/$IMAGE_OWNER/runnerctl-runner:$IMAGE_TAG" >/dev/null
       - name: Publish crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,4 +1,4 @@
-use crate::config::Pool;
+use crate::config::{AppAuth, Pool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -38,7 +38,10 @@ pub enum Request {
     },
     Auth {
         profile: String,
+        #[serde(default)]
         credential: String,
+        #[serde(default)]
+        app: Option<AppAuth>,
     },
     Logs {
         pool: String,

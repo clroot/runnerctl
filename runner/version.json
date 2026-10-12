@@ -1,0 +1,9 @@
+{
+  "version": "2.338.0",
+  "published_at": "2026-10-06T13:55:11Z",
+  "sha256": {
+    "x64": "af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32",
+    "arm64": "628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b",
+    "arm": "1d6a7688d2aca1a1fecd4df5d473e4aa4226c1f1785ff915cf84049665a3483f"
+  }
+}

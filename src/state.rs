@@ -34,6 +34,8 @@ pub struct PoolState {
     #[serde(default)]
     pub retry_scope: RetryScope,
     pub error: Option<String>,
+    #[serde(default)]
+    pub observed_at: u64,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +55,7 @@ impl Default for PoolState {
             retry_at: 0,
             retry_scope: RetryScope::Observation,
             error: None,
+            observed_at: 0,
         }
     }
 }

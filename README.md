@@ -3,168 +3,116 @@
 [![crates.io](https://img.shields.io/crates/v/runnerctl.svg)](https://crates.io/crates/runnerctl)
 [![CI](https://github.com/clroot/runnerctl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/clroot/runnerctl/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/crates/l/runnerctl.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A Rust CLI for managing multiple GitHub Actions runner pools on a single Linux Docker host. Configure each pool's organization, authentication profile, labels, image, and capacity. The manager runs the official GitHub runner in ephemeral containers, removes containers after their jobs finish, and creates replacements.
+**Run several GitHub Actions runner pools on one Docker host. No Kubernetes. A fresh container for every job.**
 
-## Requirements and installation
+For developers and small teams who already have a Linux server and want to manage runner capacity, images, labels, and credentials from one CLI. Pools can belong to different GitHub organizations or individual repositories. Runner containers receive short-lived registration tokens; PATs and GitHub App private keys stay with the manager.
 
-Install and run `runnerctl` on the Linux host that will run your GitHub Actions runners. You need:
+Example status:
 
-- Rust and Cargo (Rust 1.85 or later; the current stable toolchain is recommended). Install them with [rustup](https://rustup.rs) if needed.
-- A C compiler and linker for building native dependencies during installation.
-- Docker Engine and CLI, with Docker running and your user able to access its socket.
+```text
+POOL                 SCOPE              INTENT     TARGET ACTIVE   IDLE   BUSY STARTING  UNKNOWN DRAINING
+validate             example-team       running         2      2      1      1        0        0        0
+build                octocat/project    running         1      1      0      1        0        0        0
+```
 
-A systemd user service is optional.
+The manager restores state after a restart, replaces completed runners, and preserves running jobs during normal stopping and upgrades. Capacity is configured per pool. This is a single-host manager for trusted workflows; pool labels and shared Docker access do not isolate tenants.
 
-### Install from crates.io
+> This checkout documents the upcoming **v0.2.0** release. Until that release is published, use the [development installation](#development) to try these changes. Published v0.1.x uses a locally built runner image.
 
-Install the latest published release from [crates.io](https://crates.io/crates/runnerctl):
+## Install with Cargo
+
+On the Linux Docker host, install Rust/Cargo 1.85 or later and a C compiler/linker. Docker Engine must be running, and your user must be able to access its local socket.
 
 ```bash
 cargo install runnerctl --locked
 runnerctl --version
+runnerctl image pull
 ```
 
-Cargo installs the binary into `~/.cargo/bin` by default. Make sure that directory (or `$CARGO_HOME/bin` if customized) is on your `PATH`. The `--locked` flag uses the release's pinned dependency versions. Run the same install command again to update to a newer release.
+The CLI comes from crates.io. `image pull` downloads the matching versioned runner image from GHCR; releases build images for Linux amd64 and arm64. Add `~/.cargo/bin` to `PATH` if needed. Repeat `cargo install runnerctl --locked` to update the CLI.
 
-### Build the runner image
+## Your first runner
 
-The CLI installation does not build the Docker image used by runner containers. Before continuing to the quick start, build the default image on the Docker host used by `runnerctl`. Docker can fetch the build files directly from the `v0.1.1` release:
-
-```bash
-docker build -t local/runnerctl-runner:2.337.0 \
-  'https://github.com/clroot/runnerctl.git#v0.1.1:runner'
-```
-
-This tag matches the CLI's default pool image. The image build verifies the runner archive's SHA-256 checksum. To build another runner version, supply both the `RUNNER_VERSION` and architecture-specific `RUNNER_SHA256` build arguments, and use a matching image tag. Custom images must follow the image contract below.
-
-## Quick start
+Create one organization pool with one runner:
 
 ```bash
-runnerctl init --org '<YOUR_ORG>'
-runnerctl auth login --profile '<YOUR_ORG>'
-
-runnerctl pool add validate --org '<YOUR_ORG>' --auth '<YOUR_ORG>' \
-  --labels validate --replicas 4
-runnerctl pool add build --org '<YOUR_ORG>' --auth '<YOUR_ORG>' \
-  --labels build --replicas 2 --docker-socket
-
+runnerctl init --org YOUR_ORG
+runnerctl auth login --profile YOUR_ORG
+runnerctl pool add ci --org YOUR_ORG --auth YOUR_ORG --labels ci --replicas 1
 runnerctl doctor
 runnerctl service install
-runnerctl start --all
-runnerctl status
+runnerctl start ci
+runnerctl status --pool ci
 ```
 
-PAT input is hidden at the terminal. For automation, use `auth login --profile NAME --token-stdin` or `--env VARIABLE`. Do not pass tokens as command arguments. Configuration stores only credential file or environment variable references. Credential files use mode `0600`, management directories use `0700`, and runner containers receive only short-lived registration tokens.
+`auth login` reads a PAT without echoing it. A fine-grained organization PAT needs **Self-hosted runners: Read and write**, plus any organization approval. See [authentication](docs/authentication.md) for GitHub Apps and automation.
 
-A fine-grained PAT needs the target organization's **Self-hosted runners: Read and write** permission and any approval required by organization policy. `doctor` checks runner read access, local image availability, and the observed health of running pools (errors, retry delays, unknown runners, and unavailable capacity). Intentionally stopped or zero-replica pools are not marked degraded; registration write access is checked when creating a runner. GitHub App authentication is planned for a later release.
+`service install` starts a systemd user service. To keep it running after logout, enable lingering with `sudo loginctl enable-linger "$USER"`. You can also run `runnerctl manager` in another terminal. Commands and the manager must use the same `--home` directory.
 
-To run without a service, use `runnerctl manager` in the foreground. The CLI and manager must use the same `--home` directory. The default is `$XDG_CONFIG_HOME/runnerctl` or `~/.config/runnerctl`. When the manager is stopped, CLI configuration and intent changes are still saved under an exclusive lock, but container provisioning requires the manager to be running.
+Add this workflow to a repository accessible to the organization runner, then run it from GitHub Actions:
 
-File credentials are recommended for systemd because user services do not automatically inherit shell environment variables. To keep the service running without an active login, configure `sudo loginctl enable-linger "$USER"`. `service install` creates a unit pointing to the current binary and enables and starts it. Reinstall the service if you move the binary.
+```yaml
+name: runnerctl smoke test
+on: workflow_dispatch
+jobs:
+  smoke:
+    runs-on: [self-hosted, 'pool:ci', ci]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo 'runnerctl is ready'
+```
 
-## Managing multiple pools
+After the job, `status` shows a replacement with a new runner ID.
+
+For an individual repository, use `init --repo OWNER/REPO` and `pool add ci --repo OWNER/REPO --auth OWNER --labels ci`. A fine-grained repository PAT needs **Administration: Read and write** for that repository. Organization and repository pools can coexist.
+
+## Daily commands
 
 ```bash
 runnerctl pool list
-runnerctl pool show build
-runnerctl status --pool build
+runnerctl status --pool ci
 runnerctl --json status
-runnerctl scale build 3
-runnerctl stop build
-runnerctl start build
-runnerctl logs <runner-id> --pool build --follow
-runnerctl upgrade --pool build --image local/runnerctl-runner:2.337.0
-runnerctl pool remove build
+runnerctl scale ci 3
+runnerctl stop ci --wait --timeout 5m
+runnerctl start ci
+runnerctl logs RUNNER_ID --pool ci --follow
+runnerctl pool remove ci --wait --timeout 5m
 ```
 
-`replicas` is the pool's concurrent capacity, including busy runners. New pools are **stopped by default**. `scale` updates the desired capacity without starting a stopped pool. Starting or stopping every pool requires `--all`.
+**Normal stop drains runners.** Replacements stop immediately, busy jobs finish, and idle runners can accept one final job before removal. `--wait` waits for cleanup; its timeout never escalates to cancellation. Use `--force` when you explicitly want to terminate existing work. Status explains whether draining runners are waiting for a job, finishing a job, or awaiting cleanup.
 
-Stopping, scaling down, deleting, and updating pools limit new provisioning and wait for existing jobs to finish naturally. **Idle runners may remain until they receive and complete their next job.** Checking GitHub's busy flag cannot eliminate the race between job assignment and container termination, so an idle observation alone does not trigger forced termination. These runners are marked `draining`; elapsed time does not automatically cancel work. Use `stop build --force` when immediate termination is necessary; this can interrupt running jobs. After a forced stop, remote registration cleanup may remain pending until GitHub connectivity is restored.
-
-Stopping the manager process does not stop running containers. On restart, the manager recovers from SQLite and container ownership labels. Recreating a pool with the same name assigns a new UUID, distinguishing it from the previous pool. Containers belonging to another manager or an existing Compose deployment are left untouched.
-
-To route jobs to a specific pool within an organization, include its automatically registered pool label:
-
-```yaml
-jobs:
-  validate:
-    runs-on: [self-hosted, 'pool:validate', validate]
-    steps:
-      - uses: actions/checkout@v4
-      - run: echo 'validation job'
-```
-
-Pool names are not access-control boundaries. Configure runner group repository access policies in GitHub. Sharing the host Docker socket is intended for trusted workflows and does not provide security isolation between pools. The default image includes the Docker CLI for Docker builds in shell steps. Workflows using `jobs.<job>.container`, service containers, or host bind mounts need separate validation of their workspace path mappings.
-
-## Configuration
-
-See [config.example.toml](config.example.toml) for three pools across two organizations.
+To enable Docker builds, job containers, and services, create a pool with `--docker-socket`. The provided image shares the host network and maps its runtime/workspace to matching host paths. This requires trusted workflows. Check the [workflow compatibility matrix](docs/compatibility.md).
 
 ```bash
-runnerctl config check
-runnerctl config apply
-# Use optimistic concurrency control in external automation.
-runnerctl config apply --revision 3
+runnerctl pool add build --org YOUR_ORG --auth YOUR_ORG --labels build \
+  --replicas 2 --docker-socket --cpus 2 --memory 2g
 ```
 
-The sum of all configured replicas, including stopped pools, must not exceed `manager.max_runners`. Creation reservations and containers awaiting cleanup also count toward actual capacity. The current implementation rotates through pools and creates **one runner at a time**, staying within `max_parallel_creates`. Increasing that setting does not yet enable parallel creation.
+CPU and memory limits apply to each runner container. Sibling job/service containers and Docker builds use the host daemon and need their own resource limits.
 
-Manual file edits take effect only after `config apply`. CLI configuration changes are rejected while unapplied edits exist, preventing accidental overwrites. Delete pools with `pool remove`. Changing a pool's organization or authentication profile requires the pool to be stopped and its previous registrations fully cleaned up. Image, label, and runner group changes apply to a new generation of runners.
+## Documentation
 
-SQLite is the source of truth for applied configuration. If the process exits after saving the database but before writing TOML, the file may differ from the applied state. Compare the applied configuration and revision from `--json status` with the file, then recover by applying the desired file contents with `config apply`. Saved credential files are not automatically deleted. After rotating a token, check that an old file is no longer referenced before removing it.
+- [Authentication: PATs and GitHub Apps](docs/authentication.md)
+- [Operations: configuration, draining, recovery, updates, and custom images](docs/operations.md)
+- [Workflow compatibility and real GitHub checks](docs/compatibility.md)
+- [Example configuration](config.example.toml)
+- [Tests](tests/README.md) and [release procedure](docs/releases.md)
 
-## Failures and logs
-
-- GitHub and Docker are polled periodically. Docker event streaming is not yet implemented.
-- API observation failures are reported as `unknown` and do not cause running containers to be deleted.
-- Authentication errors and rate limits are shared within an authentication profile. Failed pools retry with bounded exponential backoff and jitter (at most 600 seconds). After runner exits, provisioning pauses during that delay while observation and cleanup continue; dependency failures pause reconciliation to avoid repeatedly hitting a failing Docker daemon or API. Retry scope and deadlines survive manager restarts.
-- A runner that exits without completing a job is recorded as a failure. All exited runners found in a reconciliation pass are cleaned before replacement is attempted. Runners started before the current host boot were stopped by the reboot, so they are cleaned and replaced immediately without being recorded as failures. Normal completion requires both the completion hook and container exit.
-- Replacement containers receive new names and fresh filesystems, avoiding registration state left by container restarts.
-- A live but unresponsive process may remain `unknown`. Inspect its state and use an explicit `stop --force` followed by `start` if necessary.
-- Before deleting a container, the manager saves recent logs, up to 1 MiB, and a `_diag` archive, up to 32 MiB, in `<home>/logs`. Archive failure delays deletion and reports an error.
-- Docker logs are limited to three 10 MiB files. Archived files expire after seven days by default; retention cleanup runs during successful reconciliation of an active pool.
-- `logs --follow` polls the selected container and ends when that container is replaced. Previous logs remain in the archive directory.
-- Rolling updates replace runners after their jobs finish, without adding extra capacity. Startup failures trigger backoff for the affected pool while existing jobs continue.
-
-Automatic runner updates are disabled; updates are delivered through images. Automatic tracking of runner version support deadlines is not yet implemented. Monitor GitHub's update requirements and rebuild images accordingly.
-
-## Image contract
-
-The default Dockerfile carries forward the Ubuntu, Git, and Docker CLI setup from the existing deployment. `/entrypoint.sh` starts as root to configure Docker socket group access, consumes `/run/runnerctl/token`, and then runs `config.sh --ephemeral --disableupdate` and `run.sh` as a regular user. The PAT is not injected into this container.
-
-Custom images must handle `GITHUB_ORG`, `RUNNER_NAME`, `RUNNER_LABELS`, and `RUNNER_GROUP`, consume and remove `/run/runnerctl/token` during registration, and exit after one job. The completion hook must create `/run/runnerctl/completed`, and diagnostic files must be written to `/home/runner/actions-runner/_diag`. Extend `runner/Dockerfile` with additional build tools when possible.
-
-## Testing and migration
-
-For development, clone the repository and install the local checkout instead of the published crate:
+## Development
 
 ```bash
 git clone https://github.com/clroot/runnerctl.git
 cd runnerctl
 cargo install --path . --locked
-docker build -t local/runnerctl-runner:2.337.0 runner
-```
-
-Run the checks from the repository root:
-
-```bash
+docker build -t local/runnerctl-test-base:1 runner
+# Use --image local/runnerctl-test-base:1 when adding a development pool.
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-See [tests/README.md](tests/README.md) for isolated tests using real Docker containers. These tests create and clean up only dedicated containers labeled with a randomly generated manager ID. They do not register runners with a real organization or execute GitHub workflows.
+For migration, start with a single runner and a unique label, verify your workflows, then move capacity from your previous setup. Existing v0.1 organization/PAT configurations and saved state remain readable. Existing pool image references are preserved; choose the new image explicitly when upgrading a pool.
 
-Start migration with one test runner using a new label. Verify your actual workflows and Docker usage, then stop existing Compose slots individually and increase the new pool's capacity. Adjust the existing recovery timer's management scope so it cannot recreate migrated runners, and disable it once migration is complete.
-
-## Publishing a release
-
-Maintainers commit the desired version in `Cargo.toml` and `Cargo.lock`, then create and publish a GitHub release for the matching `v<version>` tag. Publishing the release triggers the repository workflow, which checks the tag against `Cargo.toml`, runs formatting, clippy, tests and a publication dry run, then uploads the crate to crates.io. The repository's `CARGO_REGISTRY_TOKEN` secret is already configured; prerelease GitHub releases are rejected.
-
-## References
-
-- [GitHub runner API and permissions](https://docs.github.com/en/rest/actions/self-hosted-runners)
-- [Ephemeral runners and update policies](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
-- [Job completion hooks](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts)
+Licensed under [MIT](LICENSE). Contributions and reproducible bug reports are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).

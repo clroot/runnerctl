@@ -1,5 +1,5 @@
 name: CI
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
@@ -11,7 +11,8 @@ jobs:
       - run: cargo +stable fmt --check
       - run: cargo +stable clippy --all-targets --locked -- -D warnings
       - run: cargo +stable test --locked
-      - run: docker build -t local/runnerctl-runner:2.337.0 runner
+      - run: python3 scripts/update-runner.py --check
+      - run: docker build -t local/runnerctl-test-base:1 runner
       - run: docker build -t local/runnerctl-test:1 -f tests/Dockerfile .
       - run: bash tests/entrypoint.sh
       - run: cargo +stable test --locked docker_ -- --ignored --nocapture
