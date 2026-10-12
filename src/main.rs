@@ -364,18 +364,19 @@ async fn run() -> Result<()> {
             "DRAINING"
         );
         for p in pools {
+            // JSON values ignore format widths; strings honor the column alignment.
             println!(
                 "{:<20} {:<18} {:<10} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8}",
                 p["name"].as_str().unwrap_or(""),
                 p["organization"].as_str().unwrap_or(""),
                 p["intent"].as_str().unwrap_or(""),
-                p["replicas"],
-                p["active"],
-                p["idle"],
-                p["busy"],
-                p["starting"],
-                p["unknown"],
-                p["draining"]
+                p["replicas"].to_string(),
+                p["active"].to_string(),
+                p["idle"].to_string(),
+                p["busy"].to_string(),
+                p["starting"].to_string(),
+                p["unknown"].to_string(),
+                p["draining"].to_string()
             );
             if let Some(error) = p["error"].as_str() {
                 println!("  error: {error}");

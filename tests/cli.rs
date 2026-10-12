@@ -43,6 +43,90 @@ fn cli_multi_pool_offline_lifecycle() {
     cmd(h).args(["scale", "build", "100"]).assert().failure();
     cmd(h).args(["config", "check"]).assert().success();
 }
+
+#[test]
+fn cli_status_aligns_numeric_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = dir.path();
+    cmd(h)
+        .args(["init", "--org", "eduvil-dev"])
+        .assert()
+        .success();
+    for (name, replicas) in [("validate", "2"), ("general", "12")] {
+        cmd(h)
+            .args([
+                "pool",
+                "add",
+                name,
+                "--org",
+                "eduvil-dev",
+                "--auth",
+                "eduvil-dev",
+                "--labels",
+                name,
+                "--replicas",
+                replicas,
+            ])
+            .assert()
+            .success();
+    }
+    cmd(h).args(["start", "--all"]).assert().success();
+    let out = cmd(h).arg("status").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().take(3).collect();
+    assert_eq!(lines.len(), 3, "{stdout}");
+    let headers: Vec<_> = lines[0].split_whitespace().collect();
+    assert_eq!(
+        headers,
+        [
+            "POOL",
+            "ORGANIZATION",
+            "INTENT",
+            "TARGET",
+            "ACTIVE",
+            "IDLE",
+            "BUSY",
+            "STARTING",
+            "UNKNOWN",
+            "DRAINING",
+        ]
+    );
+    for (line, (name, replicas)) in lines[1..]
+        .iter()
+        .zip([("validate", "2"), ("general", "12")])
+    {
+        let cells: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(
+            cells,
+            [
+                name,
+                "eduvil-dev",
+                "running",
+                replicas,
+                "0",
+                "0",
+                "0",
+                "0",
+                "0",
+                "0"
+            ]
+        );
+        let mut end = 0;
+        for (column, cell) in cells.iter().enumerate() {
+            end += line[end..].find(cell).unwrap() + cell.len();
+            if column >= 3 {
+                let header = headers[column];
+                assert_eq!(
+                    end,
+                    lines[0].find(header).unwrap() + header.len(),
+                    "{header} is not right-aligned:\n{stdout}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn credentials_are_not_in_config_or_output() {
     let dir = tempfile::tempdir().unwrap();
