@@ -1,0 +1,50 @@
+name: Check runner updates
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: runner-version-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Update runner version and digests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/update-runner.py
+      - name: Open or update version pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet -- runner; then exit 0; fi
+          version="$(python3 -c 'import json; print(json.load(open("runner/version.json"))["version"])')"
+          branch=automation/runner-version
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$branch"
+          git add runner/Dockerfile runner/version.json
+          git commit -m "Update GitHub Actions runner to $version"
+          git push --force-with-lease origin "$branch"
+          cat > "$RUNNER_TEMP/runner-update-body.md" <<'BODY'
+          Updates the pinned runner archives and GitHub-provided SHA-256 digests.
+
+          Validate the Docker and workflow compatibility checks, then publish a new CLI/image release within GitHub's update window. Images have automatic runner updates disabled; critical security updates may require immediate action.
+          BODY
+          number="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "Update GitHub Actions runner to $version" --body-file "$RUNNER_TEMP/runner-update-body.md"
+          else
+            gh pr create --head "$branch" --title "Update GitHub Actions runner to $version" --body-file "$RUNNER_TEMP/runner-update-body.md"
+          fi

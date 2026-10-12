@@ -37,6 +37,30 @@ impl Docker {
         Self::command(&["image".into(), "inspect".into(), image.into()]).await?;
         Ok(())
     }
+    pub async fn image_version(image: &str) -> Result<Option<String>> {
+        let bytes = Self::command(&["image".into(), "inspect".into(), image.into()]).await?;
+        let data: Value = serde_json::from_slice(&bytes)?;
+        Ok(data[0]["Config"]["Labels"]["io.runnerctl.runner.version"]
+            .as_str()
+            .map(str::to_owned))
+    }
+    pub async fn pull(image: &str) -> Result<()> {
+        let status = tokio::time::timeout(
+            Duration::from_secs(600),
+            Command::new("docker")
+                .args(["pull", image])
+                .stdout(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .context("Docker pull timed out")??;
+        ensure!(
+            status.success(),
+            "Docker pull failed; check registry access and image tag"
+        );
+        Ok(())
+    }
     pub async fn list(manager: &str) -> Result<Vec<Value>> {
         let ids = Self::command(&[
             "ps".into(),
@@ -59,7 +83,7 @@ impl Docker {
             && labels["io.runnerctl.run"].as_str() == Some(&run.id)
             && labels["io.runnerctl.pool"].as_str() == Some(&run.pool_id)
     }
-    pub async fn create(manager: &str, run: &Run, paths: &Paths) -> Result<()> {
+    fn create_args(manager: &str, run: &Run, paths: &Paths) -> Vec<String> {
         let bootstrap = paths.home.join("runs").join(&run.id);
         let mut args: Vec<String> = vec![
             "create".into(),
@@ -74,6 +98,12 @@ impl Docker {
             "--security-opt".into(),
             "no-new-privileges:true".into(),
         ];
+        if let Some(cpus) = run.pool.cpus {
+            args.extend(["--cpus".into(), cpus.to_string()]);
+        }
+        if let Some(memory) = &run.pool.memory {
+            args.extend(["--memory".into(), memory.clone()]);
+        }
         for (key, value) in [
             ("manager", manager),
             ("pool", run.pool_id.as_str()),
@@ -97,6 +127,10 @@ impl Docker {
         ] {
             args.extend(["--env".into(), format!("{key}={value}")]);
         }
+        args.extend(["--env".into(), format!("GITHUB_URL={}", run.pool.url())]);
+        if run.pool.repository.is_some() {
+            args.extend(["--env".into(), "RUNNER_SCOPE=repo".into()]);
+        }
         // The directory holds only a short-lived registration token and completion marker.
         // :Z supports enforcing SELinux hosts; the root entrypoint consumes the token.
         args.extend([
@@ -104,12 +138,32 @@ impl Docker {
             format!("{}:/run/runnerctl:Z", bootstrap.display()),
         ]);
         if run.pool.docker_socket {
+            // Services in non-container jobs are reached via localhost, just as
+            // on a bare-metal runner. The shared daemon is already a host trust boundary.
+            args.extend(["--network".into(), "host".into()]);
+            // The host daemon must see the same runtime/workspace paths as the runner.
+            let runtime = bootstrap.join("runtime");
+            args.extend([
+                "--volume".into(),
+                format!("{}:{}:Z", runtime.display(), runtime.display()),
+                "--env".into(),
+                format!("RUNNER_ROOT={}", runtime.display()),
+                "--env".into(),
+                format!("RUNNER_UID={}", unsafe { libc::geteuid() }),
+            ]);
             args.extend([
                 "--volume".into(),
                 "/var/run/docker.sock:/var/run/docker.sock".into(),
             ]);
         }
         args.push(run.pool.image.clone());
+        args
+    }
+    pub async fn create(manager: &str, run: &Run, paths: &Paths) -> Result<()> {
+        if run.pool.docker_socket {
+            crate::config::secure_dir(&paths.home.join("runs").join(&run.id).join("runtime"))?;
+        }
+        let args = Self::create_args(manager, run, paths);
         Self::command(&args).await?;
         Ok(())
     }
@@ -124,6 +178,39 @@ impl Docker {
         }
         args.push(id.into());
         Self::command(&args).await?;
+        Ok(())
+    }
+    pub async fn repair_runtime_permissions(run: &Run, paths: &Paths) -> Result<()> {
+        // A job container can create root-owned files in the shared workspace.
+        // Mount only this already-stopped runner's directory, without network or socket access.
+        let directory = paths.home.join("runs").join(&run.id);
+        Self::command(&[
+            "run".into(),
+            "--rm".into(),
+            "--name".into(),
+            format!("{}-cleanup", run.id),
+            "--label".into(),
+            format!("io.runnerctl.cleanup={}", run.id),
+            "--network=none".into(),
+            "--user=0".into(),
+            "--cpus=1".into(),
+            "--memory=128m".into(),
+            "--cap-drop=ALL".into(),
+            "--cap-add=CHOWN".into(),
+            "--cap-add=DAC_OVERRIDE".into(),
+            "--cap-add=FOWNER".into(),
+            "--security-opt=no-new-privileges:true".into(),
+            "--volume".into(),
+            format!("{}:/cleanup:Z", directory.display()),
+            "--entrypoint=/bin/sh".into(),
+            run.pool.image.clone(),
+            "-c".into(),
+            "chown -hR \"$1:$2\" /cleanup && chmod -R u+rwX /cleanup".into(),
+            "--".into(),
+            unsafe { libc::geteuid() }.to_string(),
+            unsafe { libc::getegid() }.to_string(),
+        ])
+        .await?;
         Ok(())
     }
     pub async fn logs(id: &str) -> Result<String> {

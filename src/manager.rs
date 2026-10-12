@@ -11,18 +11,32 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
+    future::Future,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
+    sync::{mpsc, oneshot, watch},
 };
 use uuid::Uuid;
 
 const UNEXPECTED_EXIT_ERROR: &str =
     "runner exited before completing a job; inspect archived diagnostics";
 const MAX_RETRY_SECONDS: u64 = 600;
+struct Envelope {
+    request: Request,
+    reply: oneshot::Sender<Result<Value>>,
+}
+#[derive(Debug)]
+struct ReconcileInterrupted;
+impl std::fmt::Display for ReconcileInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("reconciliation interrupted by a control request")
+    }
+}
+impl std::error::Error for ReconcileInterrupted {}
 
 pub fn hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
@@ -47,6 +61,10 @@ pub struct Engine {
     github: Github,
     cursor: usize,
     boot_time: Option<u64>,
+    commands: Option<mpsc::Receiver<Envelope>>,
+    snapshots: Option<watch::Sender<State>>,
+    epoch: u64,
+    reconcile_epoch: Option<u64>,
 }
 impl Engine {
     pub fn open(paths: Paths) -> Result<Self> {
@@ -68,10 +86,18 @@ impl Engine {
             github: Github::new()?,
             cursor: 0,
             boot_time: host_boot_time(),
+            commands: None,
+            snapshots: None,
+            epoch: 0,
+            reconcile_epoch: None,
         })
     }
     fn save(&self) -> Result<()> {
-        self.store.save(&self.state)
+        self.store.save(&self.state)?;
+        if let Some(snapshots) = &self.snapshots {
+            snapshots.send_replace(self.state.clone());
+        }
+        Ok(())
     }
     fn clean_file(&self) -> Result<()> {
         ensure!(
@@ -93,6 +119,9 @@ impl Engine {
         self.state = state;
         config::atomic_write(&self.paths.config(), text.as_bytes())?;
         self.github.clear();
+        if let Some(snapshots) = &self.snapshots {
+            snapshots.send_replace(self.state.clone());
+        }
         Ok(())
     }
     fn targets(&self, pool: Option<String>, all: bool) -> Result<Vec<String>> {
@@ -105,14 +134,60 @@ impl Engine {
         }
     }
     pub async fn handle(&mut self, request: Request) -> Result<Value> {
-        let result = self.handle_inner(request).await;
+        match &request {
+            Request::Doctor => return diagnose(&self.state, &self.github).await,
+            Request::Logs { pool, id } => return runner_logs(&self.state, pool, id).await,
+            Request::Upgrade { image, .. } => {
+                config::validate_image(image)?;
+                Docker::image(image).await?;
+            }
+            _ => {}
+        }
+        self.handle_local(request)
+    }
+    fn handle_local(&mut self, request: Request) -> Result<Value> {
+        let mutating = !matches!(&request, Request::Status { .. });
+        let result = self.handle_inner(request);
         if result.is_err() {
             // A failed mutation must not leave uncommitted changes in memory.
             self.state = self.store.load()?.context("state disappeared")?;
+            if let Some(snapshots) = &self.snapshots {
+                snapshots.send_replace(self.state.clone());
+            }
+        }
+        if mutating {
+            // Even a failed file write can follow a successful SQLite commit.
+            self.epoch = self.epoch.wrapping_add(1);
         }
         result
     }
-    async fn handle_inner(&mut self, request: Request) -> Result<Value> {
+    // State has a single writer. External work remains in flight while local
+    // requests are accepted; a mutation restarts reconciliation after it finishes.
+    async fn external<T>(&mut self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        if self.reconcile_epoch.is_some_and(|e| e != self.epoch) {
+            return Err(ReconcileInterrupted.into());
+        }
+        tokio::pin!(future);
+        let result = loop {
+            let Some(commands) = &mut self.commands else {
+                break future.await;
+            };
+            tokio::select! {
+                result = &mut future => break result,
+                envelope = commands.recv() => {
+                    if let Some(envelope) = envelope {
+                        let result = self.handle_local(envelope.request);
+                        let _ = envelope.reply.send(result);
+                    } else { break future.await; }
+                }
+            }
+        };
+        if self.reconcile_epoch.is_some_and(|e| e != self.epoch) {
+            return Err(ReconcileInterrupted.into());
+        }
+        result
+    }
+    fn handle_inner(&mut self, request: Request) -> Result<Value> {
         if request.changes_config() {
             self.clean_file()?;
         }
@@ -125,7 +200,7 @@ impl Engine {
                     let state = &self.state.pools[&p.name];
                     let runs: Vec<&Run> = self.state.runs.values().filter(|r| r.pool_id == state.id).collect();
                     let count = |phase: &str| runs.iter().filter(|r| r.phase == phase).count();
-                    json!({"name":p.name,"organization":p.organization,"replicas":p.replicas,"intent":if state.deleting {"deleting"} else if state.running {"running"} else {"stopped"},"active":runs.len(),"starting":count("creating")+count("starting"),"idle":count("idle"),"busy":count("busy"),"unknown":count("unknown"),"draining":runs.iter().filter(|r|r.retiring).count(),"generation":state.generation,"error":state.error,"retry_at":state.retry_at,"config":p,"runners":runs.iter().map(|r|json!({"id":r.id,"phase":r.phase,"retiring":r.retiring,"generation":r.generation})).collect::<Vec<_>>()})
+                    json!({"name":p.name,"organization":p.organization,"repository":p.repository,"target":p.target(),"replicas":p.replicas,"intent":if state.deleting {"deleting"} else if state.running {"running"} else {"stopped"},"active":runs.len(),"starting":count("creating")+count("starting"),"idle":count("idle"),"busy":count("busy"),"unknown":count("unknown"),"draining":runs.iter().filter(|r|r.retiring).count(),"generation":state.generation,"error":state.error,"retry_at":state.retry_at,"observed_at":state.observed_at,"config":p,"runners":runs.iter().map(|r|json!({"id":r.id,"phase":r.phase,"retiring":r.retiring,"generation":r.generation,"drain_reason":if !r.retiring {None} else if r.phase=="idle" {Some("waiting_for_next_job")} else if r.phase=="busy" {Some("job_in_progress")} else {Some("awaiting_observation_or_cleanup")} })).collect::<Vec<_>>()})
                 }).collect();
                 Ok(json!({"revision":self.state.revision,"pools":pools}))
             }
@@ -165,14 +240,23 @@ impl Engine {
                 for name in &targets {
                     let p = self.state.pools.get_mut(name).unwrap();
                     p.running = false;
+                    if force {
+                        p.retry_at = 0;
+                    }
                     for r in self.state.runs.values_mut().filter(|r| r.pool_id == p.id) {
                         r.retiring = true;
                         r.force |= force;
                     }
                 }
                 self.save()?;
+                let pending = targets.iter().any(|n| {
+                    self.state
+                        .runs
+                        .values()
+                        .any(|r| r.pool_id == self.state.pools[n].id)
+                });
                 Ok(
-                    json!({"stopped":targets,"pending":true,"message":"No replacement runners; existing runners drain after their job. Idle runners may wait for a job. Use --force only to cancel work."}),
+                    json!({"stopped":targets,"pending":pending,"mode":if force {"force"} else {"drain"},"message":if force {"Termination requested; running jobs may be interrupted. Registration cleanup waits for GitHub connectivity."} else {"Replacements disabled. Existing idle runners can still accept one job before removal; busy jobs finish naturally. Use --wait to watch cleanup, or --force to terminate work."}}),
                 )
             }
             Request::Scale { pool, replicas } => {
@@ -185,7 +269,11 @@ impl Engine {
                 ensure!(!self.state.pools[&pool].deleting, "pool is being deleted");
                 p.replicas = replicas;
                 self.commit_config(next)?;
-                Ok(json!({"pool":pool,"replicas":replicas}))
+                self.mark_retiring(&pool);
+                self.save()?;
+                Ok(
+                    json!({"pool":pool,"replicas":replicas,"message":"Capacity updated. Excess runners drain after their next job; stopped pools remain stopped."}),
+                )
             }
             Request::Upgrade { pool, image } => {
                 let mut next = self.state.config.clone();
@@ -197,30 +285,39 @@ impl Engine {
                 ensure!(!self.state.pools[&pool].deleting, "pool is being deleted");
                 p.image = image;
                 next.validate()?;
-                Docker::image(&p_image(&next, &pool)).await?;
                 self.state.pools.get_mut(&pool).unwrap().generation += 1;
                 self.commit_config(next)?;
-                Ok(json!({"upgrading":pool}))
+                self.mark_retiring(&pool);
+                self.save()?;
+                Ok(
+                    json!({"upgrading":pool,"message":"Image updated. Existing runners drain after their next job; replacements use the new image."}),
+                )
             }
             Request::Remove { pool, force } => {
                 let p = self.state.pools.get_mut(&pool).context("unknown pool")?;
                 p.running = false;
                 p.deleting = true;
+                if force {
+                    p.retry_at = 0;
+                }
                 for r in self.state.runs.values_mut().filter(|r| r.pool_id == p.id) {
                     r.retiring = true;
                     r.force |= force;
                 }
                 self.save()?;
-                Ok(json!({"removing":pool,"pending":true}))
+                Ok(
+                    json!({"removing":pool,"pending":true,"mode":if force {"force"} else {"drain"},"message":if force {"Removal and termination requested; running jobs may be interrupted. Registration cleanup waits for GitHub connectivity."} else {"Removal requested. Idle runners can accept one final job; cleanup completes after all runners exit."}}),
+                )
             }
             Request::Auth {
                 profile,
                 credential,
+                app,
             } => {
                 ensure!(config::valid_name(&profile), "invalid profile");
                 let mut next = self.state.config.clone();
                 next.auth
-                    .insert(profile.clone(), config::Auth { credential });
+                    .insert(profile.clone(), config::Auth { credential, app });
                 self.commit_config(next)?;
                 for (name, p) in &mut self.state.pools {
                     if self
@@ -261,17 +358,19 @@ impl Engine {
                     if let Some(old) = self.state.config.pools.iter().find(|p| p.name == new.name) {
                         let ps = pool_states.get_mut(&new.name).unwrap();
                         ensure!(!ps.deleting, "cannot edit a deleting pool");
-                        if old.organization != new.organization || old.auth != new.auth {
+                        if old.api_scope() != new.api_scope() || old.auth != new.auth {
                             ensure!(
                                 !ps.running
                                     && !self.state.runs.values().any(|r| r.pool_id == ps.id),
-                                "stop and fully clean pool before changing organization/auth"
+                                "stop and fully clean pool before changing scope/auth"
                             );
                         }
                         if old.image != new.image
                             || old.labels != new.labels
                             || old.runner_group != new.runner_group
                             || old.docker_socket != new.docker_socket
+                            || old.cpus != new.cpus
+                            || old.memory != new.memory
                         {
                             ps.generation += 1;
                         }
@@ -287,58 +386,43 @@ impl Engine {
                 }
                 self.state.pools = pool_states;
                 self.commit_config(next)?;
+                for name in self.state.pools.keys().cloned().collect::<Vec<_>>() {
+                    self.mark_retiring(&name);
+                }
+                self.save()?;
                 Ok(json!({"revision":self.state.revision,"applied":true}))
             }
-            Request::Logs { pool, id } => {
-                let ps = self.state.pools.get(&pool).context("unknown pool")?;
-                let run = self
-                    .state
-                    .runs
-                    .get(&id)
-                    .context("runner not active; archived logs are in the logs directory")?;
-                ensure!(run.pool_id == ps.id, "runner does not belong to pool");
-                let containers = Docker::list(&self.state.manager_id).await?;
-                ensure!(
-                    containers
-                        .iter()
-                        .any(|c| Docker::owned(c, &self.state.manager_id, run)),
-                    "owned container not found"
-                );
-                Ok(json!({"logs":Docker::logs(&id).await?}))
+            Request::Logs { .. } | Request::Doctor => {
+                anyhow::bail!("external request must use the query handler")
             }
-            Request::Doctor => {
-                let mut checks = vec![
-                    json!({"check":"config", "ok":true, "warnings":self.state.config.warnings()}),
-                ];
-                let docker = Docker::info().await;
-                checks.push(json!({"check":"docker", "ok":docker.is_ok(), "error":docker.err().map(|e|e.to_string())}));
-                for p in self.state.config.pools.clone() {
-                    let auth = &self.state.config.auth[&p.auth];
-                    let gh = self.github.list(&p.auth, auth, &p.organization, 0).await;
-                    checks.push(json!({"check":format!("github:{}",p.name),"ok":gh.is_ok(),"error":gh.err().map(|e|e.to_string())}));
-                    let image = Docker::image(&p.image).await;
-                    checks.push(json!({"check":format!("image:{}",p.name),"ok":image.is_ok(),"error":image.err().map(|e|e.to_string())}));
-                    let state = &self.state.pools[&p.name];
-                    let runs: Vec<&Run> = self
-                        .state
-                        .runs
-                        .values()
-                        .filter(|r| r.pool_id == state.id)
-                        .collect();
-                    let health = pool_health(&p, state, &runs, now());
-                    checks.push(json!({
-                        "check":format!("pool:{}",p.name),
-                        "ok":health.ok,
-                        "intent":if state.deleting {"deleting"} else if state.running {"running"} else {"stopped"},
-                        "replicas":p.replicas,
-                        "available":health.available,
-                        "unknown":health.unknown,
-                        "error":state.error,
-                        "retry_at":state.retry_at,
-                        "reasons":health.reasons,
-                    }));
-                }
-                Ok(json!({"healthy":checks.iter().all(|c| c["ok"]==true),"checks":checks}))
+        }
+    }
+    fn mark_retiring(&mut self, name: &str) {
+        let ps = &self.state.pools[name];
+        let pool = self
+            .state
+            .config
+            .pools
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap();
+        let keep = if ps.running && !ps.deleting {
+            pool.replicas as usize
+        } else {
+            0
+        };
+        let mut order: Vec<_> = self
+            .state
+            .runs
+            .values()
+            .filter(|r| r.pool_id == ps.id)
+            .map(|r| (r.generation, r.created_at, r.id.clone()))
+            .collect();
+        order.sort_by(|a, b| b.cmp(a));
+        for (index, (_, _, id)) in order.into_iter().enumerate() {
+            let run = self.state.runs.get_mut(&id).unwrap();
+            if index >= keep || run.generation != ps.generation {
+                run.retiring = true;
             }
         }
     }
@@ -357,9 +441,16 @@ impl Engine {
         }
         // Unexpected exits delay provisioning, not observation or cleanup.
         // Dependency failures still back off the entire reconciliation attempt.
+        self.reconcile_epoch = Some(self.epoch);
         let result = self
             .reconcile(&name, replenishment_allowed(retry_at, at))
             .await;
+        let interrupted = self.reconcile_epoch != Some(self.epoch);
+        self.reconcile_epoch = None;
+        if interrupted {
+            self.save()?;
+            return Ok(());
+        }
         match result {
             Ok(report) => {
                 if report.unexpected_exits > 0 {
@@ -372,6 +463,10 @@ impl Engine {
                 }
             }
             Err(error) => {
+                if error.is::<ReconcileInterrupted>() {
+                    self.save()?;
+                    return Ok(());
+                }
                 self.record_failure(&name, &error.to_string(), RetryScope::Observation)?;
                 if let Some(p) = self.state.pools.get(&name) {
                     // Last known busy/idle is not evidence after an observation failure.
@@ -384,6 +479,9 @@ impl Engine {
                     }
                 }
             }
+        }
+        if let Some(pool) = self.state.pools.get_mut(&name) {
+            pool.observed_at = now();
         }
         self.save()?;
         Ok(())
@@ -412,7 +510,11 @@ impl Engine {
             .clone();
         let ps = self.state.pools[name].clone();
         let mut report = ReconcileReport::default();
-        let containers = Docker::list(&self.state.manager_id).await?;
+        let manager_id = self.state.manager_id.clone();
+        let paths = self.paths.clone();
+        let github = self.github.clone();
+        let scope = pool.api_scope();
+        let containers = self.external(Docker::list(&manager_id)).await?;
         // An owned but unrecorded container counts against capacity and is never deleted blindly.
         let unknown_containers = containers
             .iter()
@@ -450,7 +552,7 @@ impl Engine {
                 self.state.runs.insert(run.id.clone(), run.clone());
                 self.save()?;
                 self.archive(&mut run, container).await?;
-                Docker::remove(&run.id, true).await?;
+                self.external(Docker::remove(&run.id, true)).await?;
             }
         }
         let containers = if self
@@ -459,19 +561,14 @@ impl Engine {
             .values()
             .any(|r| r.pool_id == ps.id && r.force)
         {
-            Docker::list(&self.state.manager_id).await?
+            self.external(Docker::list(&manager_id)).await?
         } else {
             containers
         };
         let auth = self.state.config.auth[&pool.auth].clone();
+        let ttl = self.state.config.manager.poll_interval_seconds;
         let remotes = self
-            .github
-            .list(
-                &pool.auth,
-                &auth,
-                &pool.organization,
-                self.state.config.manager.poll_interval_seconds,
-            )
+            .external(github.list(&pool.auth, &auth, &scope, ttl))
             .await?;
         let ids: Vec<String> = self
             .state
@@ -485,19 +582,8 @@ impl Engine {
         } else {
             0
         };
-        // Keep the newest generation first when shrinking, but never cancel a job.
-        let mut order = ids.clone();
-        order.sort_by_key(|id| {
-            std::cmp::Reverse((
-                self.state.runs[id].generation,
-                self.state.runs[id].created_at,
-            ))
-        });
-        for (index, id) in order.iter().enumerate() {
-            if index >= keep || self.state.runs[id].generation != ps.generation {
-                self.state.runs.get_mut(id).unwrap().retiring = true;
-            }
-        }
+        // Use the same stable selection as scale/apply, including timestamp ties.
+        self.mark_retiring(name);
         self.save()?;
         let mut cleanup_error: Option<anyhow::Error> = None;
         for id in ids {
@@ -527,14 +613,13 @@ impl Engine {
                 }
                 // Token might have expired during manager downtime. Refresh before start.
                 let token = self
-                    .github
-                    .token(&pool.auth, &auth, &pool.organization)
+                    .external(github.token(&pool.auth, &auth, &scope))
                     .await?;
                 config::atomic_write(
                     &self.paths.home.join("runs").join(&id).join("token"),
                     token.as_bytes(),
                 )?;
-                Docker::start(&id).await?;
+                self.external(Docker::start(&id)).await?;
                 run.phase = "starting".into();
                 self.state.runs.insert(id, run);
                 self.save()?;
@@ -545,16 +630,16 @@ impl Engine {
                     continue;
                 }
                 // Generation was saved before Docker create; deterministic name recovers retries.
-                Docker::image(&run.pool.image).await?;
+                self.external(Docker::image(&run.pool.image)).await?;
                 let dir = self.paths.home.join("runs").join(&id);
                 config::secure_dir(&dir)?;
                 let token = self
-                    .github
-                    .token(&pool.auth, &auth, &pool.organization)
+                    .external(github.token(&pool.auth, &auth, &scope))
                     .await?;
                 config::atomic_write(&dir.join("token"), token.as_bytes())?;
-                Docker::create(&self.state.manager_id, &run, &self.paths).await?;
-                Docker::start(&id).await?;
+                self.external(Docker::create(&manager_id, &run, &paths))
+                    .await?;
+                self.external(Docker::start(&id)).await?;
                 run.phase = "starting".into();
                 self.state.runs.insert(id, run);
                 self.save()?;
@@ -574,7 +659,7 @@ impl Engine {
                     cleanup_error.get_or_insert(error);
                     continue;
                 }
-                if let Err(error) = Docker::remove(&id, false).await {
+                if let Err(error) = self.external(Docker::remove(&id, false)).await {
                     cleanup_error.get_or_insert(error);
                     continue;
                 }
@@ -582,8 +667,7 @@ impl Engine {
             // No live container remains. Fresh lookup avoids leaving a registration that
             // appeared after the cached list (or a lost response from config.sh).
             let fresh = match self
-                .github
-                .list(&pool.auth, &auth, &pool.organization, 0)
+                .external(github.list(&pool.auth, &auth, &scope, 0))
                 .await
             {
                 Ok(fresh) => fresh,
@@ -595,12 +679,32 @@ impl Engine {
             if let Some(remote) = fresh.iter().find(|r| r.name == id) {
                 // No live local worker exists, so stale busy state cannot represent running work here.
                 if let Err(error) = self
-                    .github
-                    .remove(&pool.auth, &auth, &pool.organization, remote.id)
+                    .external(github.remove(&pool.auth, &auth, &scope, remote.id))
                     .await
                 {
                     cleanup_error.get_or_insert(error);
                     continue;
+                }
+            }
+            let directory = paths.home.join("runs").join(&id);
+            if directory.exists() {
+                if let Err(error) = fs::remove_dir_all(&directory) {
+                    if run.pool.docker_socket {
+                        if let Err(error) = self
+                            .external(Docker::repair_runtime_permissions(&run, &paths))
+                            .await
+                        {
+                            cleanup_error.get_or_insert(error);
+                            continue;
+                        }
+                        if let Err(error) = fs::remove_dir_all(&directory) {
+                            cleanup_error.get_or_insert(error.into());
+                            continue;
+                        }
+                    } else {
+                        cleanup_error.get_or_insert(error.into());
+                        continue;
+                    }
                 }
             }
             if run.completed_job {
@@ -609,7 +713,6 @@ impl Engine {
             report.note_exit(&run, interrupted);
             self.state.runs.remove(&id);
             self.save()?;
-            let _ = fs::remove_dir_all(self.paths.home.join("runs").join(&id));
         }
         if let Some(error) = cleanup_error {
             return Err(error);
@@ -635,7 +738,7 @@ impl Engine {
             && total < self.state.config.manager.max_runners as usize
         {
             // Only one create per pool turn; the single writer is below max_parallel_creates.
-            Docker::image(&pool.image).await?;
+            self.external(Docker::image(&pool.image)).await?;
             let id = format!(
                 "rc-{}-{}",
                 &self.state.manager_id[..8],
@@ -664,7 +767,7 @@ impl Engine {
         if run.log_saved {
             return Ok(());
         }
-        let logs = Docker::logs(&run.id).await?;
+        let logs = self.external(Docker::logs(&run.id)).await?;
         config::atomic_write(
             &self.paths.home.join("logs").join(format!("{}.log", run.id)),
             logs.as_bytes(),
@@ -674,7 +777,8 @@ impl Engine {
             .as_str()
             .is_some_and(|s| !s.starts_with("0001-"))
         {
-            Docker::archive(&run.id, &self.paths).await?;
+            let paths = self.paths.clone();
+            self.external(Docker::archive(&run.id, &paths)).await?;
         }
         run.log_saved = true;
         self.state.runs.insert(run.id.clone(), run.clone());
@@ -702,14 +806,64 @@ impl Engine {
         Ok(())
     }
 }
-fn p_image(config: &Config, name: &str) -> String {
-    config
-        .pools
-        .iter()
-        .find(|p| p.name == name)
-        .unwrap()
-        .image
-        .clone()
+async fn runner_logs(state: &State, pool: &str, id: &str) -> Result<Value> {
+    let ps = state.pools.get(pool).context("unknown pool")?;
+    let run = state
+        .runs
+        .get(id)
+        .context("runner not active; archived logs are in the logs directory")?;
+    ensure!(run.pool_id == ps.id, "runner does not belong to pool");
+    let containers = Docker::list(&state.manager_id).await?;
+    ensure!(
+        containers
+            .iter()
+            .any(|c| Docker::owned(c, &state.manager_id, run)),
+        "owned container not found"
+    );
+    Ok(json!({"logs":Docker::logs(id).await?}))
+}
+async fn diagnose(state: &State, github: &Github) -> Result<Value> {
+    let mut checks = vec![json!({"check":"config", "ok":true, "warnings":state.config.warnings()})];
+    let docker = Docker::info().await;
+    checks.push(
+        json!({"check":"docker", "ok":docker.is_ok(), "error":docker.err().map(|e|e.to_string())}),
+    );
+    let latest = if state.config.pools.is_empty() {
+        None
+    } else {
+        github.latest_runner_release().await.ok()
+    };
+    let mut checked_images = std::collections::BTreeMap::new();
+    for p in &state.config.pools {
+        let auth = &state.config.auth[&p.auth];
+        let gh = github.list(&p.auth, auth, &p.api_scope(), 0).await;
+        checks.push(json!({"check":format!("github:{}",p.name),"ok":gh.is_ok(),"error":gh.err().map(|e|e.to_string())}));
+        if !checked_images.contains_key(&p.image) {
+            let image = Docker::image_version(&p.image)
+                .await
+                .map_err(|e| e.to_string());
+            if let Ok(version) = &image {
+                checks.push(crate::image::version_check(
+                    &p.image,
+                    version.as_deref(),
+                    latest.as_ref(),
+                ));
+            }
+            checked_images.insert(p.image.clone(), image);
+        }
+        let image = &checked_images[&p.image];
+        checks.push(json!({"check":format!("image:{}",p.name),"image":p.image,"ok":image.is_ok(),"error":image.as_ref().err()}));
+        let ps = &state.pools[&p.name];
+        let runs: Vec<&Run> = state.runs.values().filter(|r| r.pool_id == ps.id).collect();
+        let health = pool_health(p, ps, &runs, now());
+        checks.push(json!({"check":format!("pool:{}",p.name),"ok":health.ok,
+            "intent":if ps.deleting {"deleting"} else if ps.running {"running"} else {"stopped"},
+            "replicas":p.replicas,"available":health.available,"unknown":health.unknown,"error":ps.error,
+            "retry_at":ps.retry_at,"observed_at":ps.observed_at,"reasons":health.reasons}));
+    }
+    Ok(
+        json!({"healthy":checks.iter().all(|c| c["ok"]==true),"revision":state.revision,"checks":checks}),
+    )
 }
 
 #[derive(Default)]
@@ -817,26 +971,87 @@ pub async fn serve(paths: Paths) -> Result<()> {
         "runnerctl manager listening at {}",
         paths.socket().display()
     );
+    let (commands, receiver) = mpsc::channel::<Envelope>(128);
+    let (snapshots, snapshot_receiver) = watch::channel(engine.state.clone());
+    engine.commands = Some(receiver);
+    engine.snapshots = Some(snapshots);
+    let github = engine.github.clone();
+    let connections = tokio::spawn(async move {
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
+        loop {
+            let permit = permits.clone().acquire_owned().await?;
+            let (stream, _) = listener.accept().await?;
+            let commands = commands.clone();
+            let snapshots = snapshot_receiver.clone();
+            let github = github.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                serve_connection(stream, commands, snapshots, github).await;
+            });
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    });
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    loop {
+    let result = loop {
         tokio::select! {
-            _ = term.recv() => break,
-            _ = tokio::signal::ctrl_c() => break,
-            result = listener.accept() => {
-                let (mut stream,_) = result?;
-                let request = tokio::time::timeout(Duration::from_secs(5),read_request(&mut stream)).await;
-                let result = match request { Ok(Ok(request)) => engine.handle(request).await, Ok(Err(e)) => Err(e), Err(_) => Err(anyhow::anyhow!("request timeout")) };
-                let response = match result { Ok(data) => Response{ok:true,data}, Err(error) => Response{ok:false,data:json!({"error":error.to_string()})} };
-                let mut bytes=serde_json::to_vec(&response)?; bytes.push(b'\n');
-                let _=tokio::time::timeout(Duration::from_secs(5),stream.write_all(&bytes)).await;
-            },
-            _ = interval.tick() => { if let Err(e)=engine.tick().await { eprintln!("state persistence error: {e}"); return Err(e); } }
+            _ = term.recv() => break Ok(()),
+            _ = tokio::signal::ctrl_c() => break Ok(()),
+            envelope = engine.commands.as_mut().unwrap().recv() => {
+                let Some(envelope) = envelope else { break Err(anyhow::anyhow!("request listener stopped")); };
+                let _ = envelope.reply.send(engine.handle_local(envelope.request));
+            }
+            _ = interval.tick() => {
+                if let Err(error) = engine.tick().await { break Err(error); }
+            }
+        }
+    };
+    connections.abort();
+    fs::remove_file(paths.socket())?;
+    result
+}
+async fn serve_connection(
+    mut stream: UnixStream,
+    commands: mpsc::Sender<Envelope>,
+    snapshots: watch::Receiver<State>,
+    github: Github,
+) {
+    let result: Result<Value> = async {
+        let request = tokio::time::timeout(Duration::from_secs(5), read_request(&mut stream))
+            .await
+            .context("request timeout")??;
+        let state = snapshots.borrow().clone();
+        match request {
+            Request::Doctor => diagnose(&state, &github).await,
+            Request::Logs { pool, id } => runner_logs(&state, &pool, &id).await,
+            request => {
+                if let Request::Upgrade { image, .. } = &request {
+                    config::validate_image(image)?;
+                    Docker::image(image).await?;
+                }
+                let (reply, receiver) = oneshot::channel();
+                commands
+                    .send(Envelope { request, reply })
+                    .await
+                    .context("manager stopped")?;
+                receiver.await.context("manager stopped before replying")?
+            }
         }
     }
-    fs::remove_file(paths.socket())?;
-    Ok(())
+    .await;
+    let response = match result {
+        Ok(data) => Response { ok: true, data },
+        Err(error) => Response {
+            ok: false,
+            data: json!({"error":error.to_string()}),
+        },
+    };
+    if let Ok(mut bytes) = serde_json::to_vec(&response) {
+        bytes.push(b'\n');
+        let _ = tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes)).await;
+    }
 }
 async fn read_request(stream: &mut UnixStream) -> Result<Request> {
     use tokio::io::AsyncReadExt;
@@ -890,18 +1105,22 @@ mod tests {
             "team".into(),
             config::Auth {
                 credential: "env:TEST_TOKEN".into(),
+                app: None,
             },
         );
         for (name, replicas) in [("validate", 4), ("build", 2)] {
             c.pools.push(config::Pool {
                 name: name.into(),
                 organization: "test-org".into(),
+                repository: None,
                 auth: "team".into(),
                 labels: vec![name.into()],
                 runner_group: "Default".into(),
                 replicas,
                 image: config::default_image(),
                 docker_socket: false,
+                cpus: None,
+                memory: None,
             });
         }
         config::atomic_write(&paths.config(), toml::to_string(&c).unwrap().as_bytes()).unwrap();

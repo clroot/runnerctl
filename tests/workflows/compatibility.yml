@@ -1,0 +1,91 @@
+name: runnerctl compatibility
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: Unique label on the dedicated test pool
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runnerctl-compatibility-${{ inputs.runner_label }}
+  cancel-in-progress: false
+
+jobs:
+  shell:
+    runs-on: [self-hosted, '${{ inputs.runner_label }}']
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout, shell, and non-root execution
+        run: |
+          test -f README.md
+          test "$(id -u)" != 0
+          printf 'Shell and checkout passed\n'
+
+  docker-build:
+    runs-on: [self-hosted, '${{ inputs.runner_label }}']
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Buildx and workspace bind mounts
+        env:
+          TEST_TAG: runnerctl-smoke:${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          trap 'docker image rm -f "$TEST_TAG" >/dev/null 2>&1 || true' EXIT
+          docker version
+          docker buildx version
+          mkdir -p smoke-image
+          printf 'FROM alpine:3.21\nCOPY result /result\nCMD ["cat", "/result"]\n' > smoke-image/Dockerfile
+          printf 'runnerctl-build-ok\n' > smoke-image/result
+          docker buildx build --load -t "$TEST_TAG" smoke-image
+          test "$(docker run --rm "$TEST_TAG")" = runnerctl-build-ok
+          docker run --rm -v "$PWD:/workspace:ro" alpine:3.21 test -f /workspace/README.md
+
+  services:
+    runs-on: [self-hosted, '${{ inputs.runner_label }}']
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --memory 256m
+    steps:
+      - name: Service access from a shell job
+        env:
+          POSTGRES_PORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          # The runner uses the host network when sharing the Docker socket.
+          timeout 5 bash -c 'echo > /dev/tcp/127.0.0.1/'"$POSTGRES_PORT"
+          docker run --rm --network host -e PGPASSWORD=test-only-password postgres:16 \
+            psql -h 127.0.0.1 -p "$POSTGRES_PORT" -U postgres -c 'select 1'
+
+  container-job:
+    runs-on: [self-hosted, '${{ inputs.runner_label }}']
+    timeout-minutes: 10
+    container:
+      image: node:22-bookworm-slim
+      options: --cpus 1 --memory 512m
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test-only-password
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10 --memory 256m
+    steps:
+      - uses: actions/checkout@v4
+      - name: JavaScript action runtime, workspace, and service DNS
+        run: |
+          test -f README.md
+          node -e 'const s=require("net").connect(5432,"postgres",()=>{console.log("Service DNS and connection passed");s.end()});s.on("error",()=>process.exit(1));s.setTimeout(5000,()=>process.exit(1));'

@@ -178,17 +178,21 @@ fn fixture() -> anyhow::Result<(tempfile::TempDir, Engine)> {
         "team".into(),
         config::Auth {
             credential: format!("file:{}", credential.display()),
+            app: None,
         },
     );
     config.pools.push(config::Pool {
         name: "recovery".into(),
         organization: "test-org".into(),
+        repository: None,
         auth: "team".into(),
         labels: vec!["recovery".into()],
         runner_group: "Default".into(),
         replicas: 3,
         image: "local/runnerctl-test:1".into(),
         docker_socket: false,
+        cpus: None,
+        memory: None,
     });
     config::atomic_write(&paths.config(), toml::to_string(&config)?.as_bytes())?;
     Ok((dir, Engine::open(paths)?))
@@ -221,6 +225,38 @@ fn run_labels(containers: &[Value]) -> Vec<String> {
                 .map(str::to_owned)
         })
         .collect()
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and the local/runnerctl-test:1 image; see tests/README.md"]
+async fn docker_root_owned_workspace_is_removed_after_job_completion() {
+    let (_dir, mut e) = fixture().unwrap();
+    let manager_id = e.state.manager_id.clone();
+    let id = format!("rc-{}-workspace", &manager_id[..8]);
+    let (base, _server) = github_server("unrelated-runner".into()).await;
+    e.github = Github::testing(base);
+    let _cleanup = DockerCleanup {
+        manager_id: manager_id.clone(),
+    };
+    e.state.config.pools[0].docker_socket = true;
+    let run = test_run(&e, &id, "starting");
+    e.state.runs.insert(id.clone(), run.clone());
+    e.save().unwrap();
+    let directory = e.paths.home.join("runs").join(&id);
+    config::secure_dir(&directory).unwrap();
+    Docker::create(&manager_id, &run, &e.paths).await.unwrap();
+    exit_container(&id).await.unwrap();
+    let workspace = directory.join("runtime/_work/root-owned");
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(fs::metadata(&workspace).unwrap().uid(), 0);
+    assert!(directory.join("completed").exists());
+    e.tick().await.unwrap();
+    assert!(!e.state.runs.contains_key(&id));
+    assert!(
+        !directory.exists(),
+        "completed workspaces must not leak on the host"
+    );
+    assert!(Docker::list(&manager_id).await.unwrap().is_empty());
 }
 
 #[tokio::test]

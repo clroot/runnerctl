@@ -80,15 +80,7 @@ fn cli_status_aligns_numeric_columns() {
     assert_eq!(
         headers,
         [
-            "POOL",
-            "ORGANIZATION",
-            "INTENT",
-            "TARGET",
-            "ACTIVE",
-            "IDLE",
-            "BUSY",
-            "STARTING",
-            "UNKNOWN",
+            "POOL", "SCOPE", "INTENT", "TARGET", "ACTIVE", "IDLE", "BUSY", "STARTING", "UNKNOWN",
             "DRAINING",
         ]
     );

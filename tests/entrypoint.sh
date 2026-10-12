@@ -4,7 +4,7 @@ set -euo pipefail
 docker run --rm --network none --security-opt no-new-privileges:true \
   -e GITHUB_ORG=test-org -e RUNNER_NAME=entrypoint-test \
   -e RUNNER_LABELS=test -e RUNNER_GROUP=Default \
-  --entrypoint /bin/bash local/runnerctl-runner:2.337.0 -c '
+  --entrypoint /bin/bash "${RUNNER_IMAGE:-local/runnerctl-test-base:1}" -c '
 set -euo pipefail
 mkdir -p /run/runnerctl
 printf "%s" "test-token" > /run/runnerctl/token
