@@ -38,7 +38,7 @@ The manager is the sole writer of state. Status and local intent changes are ser
 
 Stopping the manager does not stop containers. Restart recovery uses SQLite and container ownership labels. Recreating a pool gives it a new UUID. Unrelated containers are never deleted. Docker event streaming is not implemented; GitHub observations are cached for the configured poll interval. `observed_at` in JSON status records the last reconciliation observation time, not a guarantee of current remote state.
 
-Observation errors produce `unknown` instead of deleting a live container. Failed pools use bounded exponential backoff with jitter, up to 600 seconds. Unexpected exits pause provisioning while observation and cleanup continue. A host reboot is distinguished from a runner failure, allowing immediate replacement of its stopped containers. Normal completion requires both the completion marker and container exit.
+Observation errors produce `unknown` instead of deleting a live container. Failed pools use bounded exponential backoff with jitter, up to 600 seconds. Unexpected exits pause provisioning while observation and cleanup continue. A reboot of the Docker host is distinguished from a runner failure, allowing immediate replacement of its stopped containers. On Docker Desktop, OrbStack and WSL2 the Docker host is a Linux VM that can restart without the computer rebooting, so the manager reads its boot time from a short-lived container of the runner image. Normal completion requires both the completion marker and container exit.
 
 A live but unresponsive runner can remain unknown. Inspect diagnostics, then explicitly stop with `--force` and restart if needed. No timeout automatically cancels work.
 
@@ -47,7 +47,8 @@ A live but unresponsive runner can remain unknown. Inspect diagnostics, then exp
 ```bash
 runnerctl logs RUNNER_ID --pool POOL --follow
 runnerctl doctor
-journalctl --user -u runnerctl.service -f
+journalctl --user -u runnerctl.service -f   # Linux and WSL2 service
+tail -f ~/.config/runnerctl/manager.log      # macOS service
 ```
 
 Before deleting a container, the manager archives up to 1 MiB of recent Docker logs and up to 32 MiB of runner diagnostics in `<home>/logs`. Archive failure delays deletion. Docker log rotation keeps three 10 MiB files. Archived files expire after seven days by default; cleanup runs during successful reconciliation of active pools. Follow mode stops when its selected container is replaced; older logs remain in the archive directory.
@@ -83,4 +84,4 @@ Custom entrypoints must:
 
 With `docker_socket = true`, the runner receives the host Docker socket and host network. This is for trusted workflows. Pool labels are routing hints; use GitHub runner groups/repository policies for access control. Shared Docker access allows control over the host and other pools.
 
-The runtime copy uses additional disk per active runner and is removed during normal cleanup. The daemon must be local to the manager host. Rootless/remote Docker, SELinux-enforcing hosts, and arbitrary custom images need separate validation; see [compatibility](compatibility.md).
+The runtime copy uses additional disk per active runner and is removed during normal cleanup. The daemon must see the manager's home at the same path: a local Docker Engine, or Docker Desktop and OrbStack with that folder shared. `doctor` checks this with a bind mount. Rootless/remote Docker, SELinux-enforcing hosts, and arbitrary custom images need separate validation; see [compatibility](compatibility.md).

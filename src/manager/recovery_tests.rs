@@ -247,8 +247,11 @@ async fn docker_root_owned_workspace_is_removed_after_job_completion() {
     Docker::create(&manager_id, &run, &e.paths).await.unwrap();
     exit_container(&id).await.unwrap();
     let workspace = directory.join("runtime/_work/root-owned");
-    use std::os::unix::fs::MetadataExt;
-    assert_eq!(fs::metadata(&workspace).unwrap().uid(), 0);
+    // Docker Desktop and OrbStack file sharing map container files to the host user.
+    if cfg!(target_os = "linux") {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&workspace).unwrap().uid(), 0);
+    }
     assert!(directory.join("completed").exists());
     e.tick().await.unwrap();
     assert!(!e.state.runs.contains_key(&id));
@@ -362,6 +365,12 @@ async fn docker_tick_recovery_backoff_restart_and_doctor() {
     assert!(
         checks
             .iter()
+            .find(|check| check["check"] == "docker:bind")
+            .is_some_and(|check| check["ok"] == json!(true))
+    );
+    assert!(
+        checks
+            .iter()
             .find(|check| check["check"] == "pool:recovery")
             .is_some_and(|check| check["ok"] == json!(false))
     );
@@ -412,6 +421,13 @@ async fn docker_tick_recovery_backoff_restart_and_doctor() {
     let labels = run_labels(&containers);
     assert!(labels.contains(&live_id));
     assert!(labels.contains(&replacement_id));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and the local/runnerctl-test:1 image; see tests/README.md"]
+async fn docker_host_boot_time_comes_from_the_daemon_kernel() {
+    let boot_time = Docker::boot_time("local/runnerctl-test:1").await.unwrap();
+    assert!(boot_time > 0 && boot_time <= now());
 }
 
 #[tokio::test]

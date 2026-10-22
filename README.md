@@ -7,7 +7,7 @@
 
 **Run several GitHub Actions runner pools on one Docker host. No Kubernetes. A fresh container for every job.**
 
-For developers and small teams who already have a Linux server and want to manage runner capacity, images, labels, and credentials from one CLI. Pools can belong to different GitHub organizations or individual repositories. Runner containers receive short-lived registration tokens; PATs and GitHub App private keys stay with the manager.
+For developers and small teams who already have a Linux server, a Mac, or a Windows PC with WSL2 and want to manage runner capacity, images, labels, and credentials from one CLI. Pools can belong to different GitHub organizations or individual repositories. Runner containers receive short-lived registration tokens; PATs and GitHub App private keys stay with the manager.
 
 Example status:
 
@@ -21,7 +21,7 @@ The manager restores state after a restart, replaces completed runners, and pres
 
 ## Install with Cargo
 
-On the Linux Docker host, install Rust/Cargo 1.85 or later and a C compiler/linker. Docker Engine must be running, and your user must be able to access its local socket.
+On the Docker host, install Rust/Cargo 1.85 or later and a C compiler/linker. Docker must be running, and your user must be able to access its local socket. On a Mac or Windows PC, read [macOS and Windows](docs/platforms.md) first.
 
 ```bash
 cargo install runnerctl --locked
@@ -47,7 +47,7 @@ runnerctl status --pool ci
 
 `auth login` reads a PAT without echoing it. A fine-grained organization PAT needs **Self-hosted runners: Read and write**, plus any organization approval. See [authentication](docs/authentication.md) for GitHub Apps and automation.
 
-`service install` starts a systemd user service. To keep it running after logout, enable lingering with `sudo loginctl enable-linger "$USER"`. You can also run `runnerctl manager` in another terminal. Commands and the manager must use the same `--home` directory.
+`service install` starts a systemd user service on Linux and WSL2, or a LaunchAgent on macOS. On Linux, keep it running after logout by enabling lingering with `sudo loginctl enable-linger "$USER"`. You can also run `runnerctl manager` in another terminal. Commands and the manager must use the same `--home` directory.
 
 Add this workflow to a repository accessible to the organization runner, then run it from GitHub Actions:
 
@@ -93,6 +93,7 @@ CPU and memory limits apply to each runner container. Sibling job/service contai
 ## Documentation
 
 - [Authentication: PATs and GitHub Apps](docs/authentication.md)
+- [macOS and Windows (WSL2)](docs/platforms.md)
 - [Operations: configuration, draining, recovery, updates, and custom images](docs/operations.md)
 - [Workflow compatibility and real GitHub checks](docs/compatibility.md)
 - [Example configuration](config.example.toml)

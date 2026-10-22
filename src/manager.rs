@@ -85,7 +85,7 @@ impl Engine {
             paths,
             github: Github::new()?,
             cursor: 0,
-            boot_time: host_boot_time(),
+            boot_time: None,
             commands: None,
             snapshots: None,
             epoch: 0,
@@ -135,7 +135,7 @@ impl Engine {
     }
     pub async fn handle(&mut self, request: Request) -> Result<Value> {
         match &request {
-            Request::Doctor => return diagnose(&self.state, &self.github).await,
+            Request::Doctor => return diagnose(&self.state, &self.github, &self.paths).await,
             Request::Logs { pool, id } => return runner_logs(&self.state, pool, id).await,
             Request::Upgrade { image, .. } => {
                 config::validate_image(image)?;
@@ -596,7 +596,7 @@ impl Engine {
                 .iter()
                 .find(|c| Docker::owned(c, &self.state.manager_id, &run));
             let status = container.and_then(|c| c["State"]["Status"].as_str());
-            let interrupted = container.is_some_and(|c| started_before_boot(c, self.boot_time));
+            let mut interrupted = false;
             if status == Some("running") || status == Some("restarting") || status == Some("paused")
             {
                 run.phase = observed_phase(remote).into();
@@ -652,6 +652,9 @@ impl Engine {
                     .join(&id)
                     .join("completed")
                     .exists();
+                if unexpected_exit(&run) {
+                    interrupted = self.stopped_by_reboot(container, &run.pool.image).await?;
+                }
                 run.phase = "cleanup".into();
                 self.state.runs.insert(id.clone(), run.clone());
                 self.save()?;
@@ -763,6 +766,19 @@ impl Engine {
         self.expire_logs()?;
         Ok(report)
     }
+    // Docker Desktop, OrbStack and WSL2 VMs restart independently of this manager, so a
+    // cached boot time is refreshed before an exit is counted as a failure.
+    async fn stopped_by_reboot(&mut self, container: &Value, image: &str) -> Result<bool> {
+        if started_at(container).is_some() && !started_before_boot(container, self.boot_time) {
+            match self.external(Docker::boot_time(image)).await {
+                Ok(boot_time) => self.boot_time = Some(boot_time),
+                Err(error) if error.is::<ReconcileInterrupted>() => return Err(error),
+                // Without a boot time the exit counts as a failure.
+                Err(_) => {}
+            }
+        }
+        Ok(started_before_boot(container, self.boot_time))
+    }
     async fn archive(&mut self, run: &mut Run, container: &Value) -> Result<()> {
         if run.log_saved {
             return Ok(());
@@ -822,11 +838,12 @@ async fn runner_logs(state: &State, pool: &str, id: &str) -> Result<Value> {
     );
     Ok(json!({"logs":Docker::logs(id).await?}))
 }
-async fn diagnose(state: &State, github: &Github) -> Result<Value> {
+async fn diagnose(state: &State, github: &Github, paths: &Paths) -> Result<Value> {
     let mut checks = vec![json!({"check":"config", "ok":true, "warnings":state.config.warnings()})];
     let docker = Docker::info().await;
     checks.push(
-        json!({"check":"docker", "ok":docker.is_ok(), "error":docker.err().map(|e|e.to_string())}),
+        json!({"check":"docker", "ok":docker.is_ok(), "runtime":docker.as_ref().ok(),
+        "error":docker.as_ref().err().map(|e|e.to_string())}),
     );
     let latest = if state.config.pools.is_empty() {
         None
@@ -860,6 +877,14 @@ async fn diagnose(state: &State, github: &Github) -> Result<Value> {
             "intent":if ps.deleting {"deleting"} else if ps.running {"running"} else {"stopped"},
             "replicas":p.replicas,"available":health.available,"unknown":health.unknown,"error":ps.error,
             "retry_at":ps.retry_at,"observed_at":ps.observed_at,"reasons":health.reasons}));
+    }
+    // Runner bootstrap directories are bind-mounted from here; checked with a local image.
+    if let Some(image) = checked_images
+        .iter()
+        .find_map(|(image, version)| version.is_ok().then_some(image))
+    {
+        let shared = Docker::shares(&paths.home.join("runs"), image).await;
+        checks.push(json!({"check":"docker:bind","ok":shared.is_ok(),"error":shared.err().map(|e|e.to_string())}));
     }
     Ok(
         json!({"healthy":checks.iter().all(|c| c["ok"]==true),"revision":state.revision,"checks":checks}),
@@ -939,23 +964,17 @@ fn unexpected_exit(run: &Run) -> bool {
     !run.completed_job && !run.retiring && !run.force
 }
 
-fn host_boot_time() -> Option<u64> {
-    fs::read_to_string("/proc/stat")
+fn started_at(container: &Value) -> Option<u64> {
+    humantime::parse_rfc3339(container["State"]["StartedAt"].as_str()?)
         .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|t| t.as_secs())
 }
 
 // Containers use --restart=no, so one started before this boot was stopped by the reboot.
 fn started_before_boot(container: &Value, boot_time: Option<u64>) -> bool {
-    let (Some(boot_time), Some(started)) = (boot_time, container["State"]["StartedAt"].as_str())
-    else {
-        return false;
-    };
-    humantime::parse_rfc3339(started)
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .is_some_and(|t| t.as_secs() < boot_time)
+    boot_time.is_some_and(|boot_time| started_at(container).is_some_and(|t| t < boot_time))
 }
 
 pub async fn serve(paths: Paths) -> Result<()> {
@@ -965,7 +984,13 @@ pub async fn serve(paths: Paths) -> Result<()> {
     if paths.socket().exists() {
         fs::remove_file(paths.socket())?;
     }
-    let listener = UnixListener::bind(paths.socket())?;
+    // Socket paths are limited to about 100 bytes (104 on macOS, 108 on Linux).
+    let listener = UnixListener::bind(paths.socket()).with_context(|| {
+        format!(
+            "cannot listen at {}; use a shorter --home path",
+            paths.socket().display()
+        )
+    })?;
     fs::set_permissions(paths.socket(), fs::Permissions::from_mode(0o600))?;
     eprintln!(
         "runnerctl manager listening at {}",
@@ -976,6 +1001,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     engine.commands = Some(receiver);
     engine.snapshots = Some(snapshots);
     let github = engine.github.clone();
+    let connection_paths = paths.clone();
     let connections = tokio::spawn(async move {
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
         loop {
@@ -984,9 +1010,10 @@ pub async fn serve(paths: Paths) -> Result<()> {
             let commands = commands.clone();
             let snapshots = snapshot_receiver.clone();
             let github = github.clone();
+            let paths = connection_paths.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                serve_connection(stream, commands, snapshots, github).await;
+                serve_connection(stream, commands, snapshots, github, paths).await;
             });
         }
         #[allow(unreachable_code)]
@@ -1017,6 +1044,7 @@ async fn serve_connection(
     commands: mpsc::Sender<Envelope>,
     snapshots: watch::Receiver<State>,
     github: Github,
+    paths: Paths,
 ) {
     let result: Result<Value> = async {
         let request = tokio::time::timeout(Duration::from_secs(5), read_request(&mut stream))
@@ -1024,7 +1052,7 @@ async fn serve_connection(
             .context("request timeout")??;
         let state = snapshots.borrow().clone();
         match request {
-            Request::Doctor => diagnose(&state, &github).await,
+            Request::Doctor => diagnose(&state, &github, &paths).await,
             Request::Logs { pool, id } => runner_logs(&state, &pool, &id).await,
             request => {
                 if let Request::Upgrade { image, .. } = &request {
@@ -1183,9 +1211,6 @@ mod tests {
         assert!(!started_before_boot(&started("not a time"), boot));
         assert!(!started_before_boot(&json!({"State":{}}), boot));
         assert!(!started_before_boot(&started("2026-09-29T07:23:50Z"), None));
-        if cfg!(target_os = "linux") {
-            assert!(host_boot_time().is_some_and(|b| b <= now()));
-        }
     }
     #[test]
     fn replenishment_backoff_is_bounded() {

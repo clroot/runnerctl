@@ -59,6 +59,7 @@ jobs:
           docker build -t local/runnerctl-test-base:1 runner
           docker build -t local/runnerctl-test:1 -f tests/Dockerfile .
           bash tests/entrypoint.sh
+          bash tests/docker-socket.sh
           cargo +stable test --locked docker_ -- --ignored --nocapture
 
   image:

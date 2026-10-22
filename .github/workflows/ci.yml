@@ -15,4 +15,13 @@ jobs:
       - run: docker build -t local/runnerctl-test-base:1 runner
       - run: docker build -t local/runnerctl-test:1 -f tests/Dockerfile .
       - run: bash tests/entrypoint.sh
+      - run: bash tests/docker-socket.sh
       - run: cargo +stable test --locked docker_ -- --ignored --nocapture
+  # GitHub-hosted macOS runners have no Docker; Docker checks run on a local Mac.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component clippy
+      - run: cargo +stable clippy --all-targets --locked -- -D warnings
+      - run: cargo +stable test --locked
