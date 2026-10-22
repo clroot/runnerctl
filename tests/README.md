@@ -8,12 +8,15 @@ For Docker lifecycle checks:
 docker build -t local/runnerctl-test-base:1 runner
 docker build -t local/runnerctl-test:1 -f tests/Dockerfile .
 bash tests/entrypoint.sh
+bash tests/docker-socket.sh
 cargo test --locked docker_ -- --ignored --nocapture
 ```
 
-The test image uses a local completion stub and never connects to GitHub. The manager uses a loopback HTTP fake for registration/list/delete. Containers are labeled with a randomly generated manager ID and cleaned up by the test guard. The tests verify two independent pools, job completion/replacement, manager state recovery, persistence of a stopped pool, batch exit recovery during provisioning backoff without interrupting busy work, immediate replacement of runners stopped by a host reboot, and removal of root-owned job workspaces.
+The test image uses a local completion stub and never connects to GitHub. The manager uses a loopback HTTP fake for registration/list/delete. Containers are labeled with a randomly generated manager ID and cleaned up by the test guard. The tests verify two independent pools, job completion/replacement, manager state recovery, persistence of a stopped pool, batch exit recovery during provisioning backoff without interrupting busy work, reading the Docker host boot time, immediate replacement of runners stopped by a host reboot, and removal of root-owned job workspaces.
 
 The entrypoint smoke test uses the production image with stubbed config/run scripts and networking disabled. It checks non-root execution, short-lived token consumption, ephemeral/update flags and completion hook permissions.
+
+The Docker socket test runs the production entrypoint the way `--docker-socket` pools do: host socket, host network and a same-path workspace under `$HOME`. It checks that the non-root runner can use the daemon and that a container it starts reads and writes the runner's workspace. Run these checks on each Docker runtime before relying on it; see [platforms](../docs/platforms.md).
 
 The responsiveness tests delay Docker responses and leave a socket client incomplete, then verify that status and stop remain responsive and changed intent prevents stale provisioning. App tests verify RSA signatures, installation token exchange, caching and refresh against a local API server. Test keys in `fixtures/` are public test data.
 

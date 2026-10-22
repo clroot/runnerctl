@@ -1,7 +1,7 @@
 use crate::{config::Paths, state::Run};
 use anyhow::{Context, Result, anyhow, ensure};
 use serde_json::Value;
-use std::time::Duration;
+use std::{io::Write, path::Path, time::Duration};
 use tokio::process::Command;
 
 pub struct Docker;
@@ -24,13 +24,46 @@ impl Docker {
         );
         Ok(output.stdout)
     }
-    pub async fn info() -> Result<()> {
-        Self::command(&[
+    pub async fn info() -> Result<String> {
+        let out = Self::command(&[
             "info".into(),
             "--format".into(),
-            "{{.ServerVersion}}".into(),
+            "{{.OperatingSystem}}".into(),
         ])
         .await?;
+        Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+    pub async fn shares(directory: &Path, image: &str) -> Result<()> {
+        // Bind mounts resolve where the daemon runs: Docker Desktop shares only some host
+        // folders with its VM, and a remote daemon sees none of them.
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let mut probe = tempfile::Builder::new()
+            .prefix(".probe-")
+            .tempfile_in(directory)?;
+        probe.write_all(nonce.as_bytes())?;
+        probe.flush()?;
+        let out = Self::command(&[
+            "run".into(),
+            "--rm".into(),
+            "--pull=never".into(),
+            "--label".into(),
+            "io.runnerctl.probe=bind".into(),
+            "--network=none".into(),
+            "--user=0".into(),
+            "--security-opt=no-new-privileges:true".into(),
+            "--volume".into(),
+            format!("{}:/probe:ro,Z", probe.path().display()),
+            "--entrypoint=/bin/sh".into(),
+            image.into(),
+            "-c".into(),
+            "cat /probe".into(),
+        ])
+        .await;
+        ensure!(
+            out.is_ok_and(|out| out == nonce.as_bytes()),
+            "Docker cannot read {} through a bind mount; run the daemon on this machine and share this path with it",
+            directory.display()
+        );
         Ok(())
     }
     pub async fn image(image: &str) -> Result<()> {
@@ -212,6 +245,30 @@ impl Docker {
         ])
         .await?;
         Ok(())
+    }
+    pub async fn boot_time(image: &str) -> Result<u64> {
+        // btime is not namespaced, so a container reports the kernel running the daemon:
+        // the host on Linux, the VM on Docker Desktop, OrbStack and WSL2.
+        let out = Self::command(&[
+            "run".into(),
+            "--rm".into(),
+            "--pull=never".into(),
+            "--label".into(),
+            "io.runnerctl.probe=boot-time".into(),
+            "--network=none".into(),
+            "--user=65534:65534".into(),
+            "--cap-drop=ALL".into(),
+            "--security-opt=no-new-privileges:true".into(),
+            "--entrypoint=/bin/sh".into(),
+            image.into(),
+            "-c".into(),
+            "while read -r key value _; do if [ \"$key\" = btime ]; then echo \"$value\"; fi; done < /proc/stat".into(),
+        ])
+        .await?;
+        String::from_utf8(out)?
+            .trim()
+            .parse()
+            .context("cannot read the Docker host boot time")
     }
     pub async fn logs(id: &str) -> Result<String> {
         let out = tokio::time::timeout(

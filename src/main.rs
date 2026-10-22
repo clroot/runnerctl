@@ -1,3 +1,6 @@
+#[cfg(not(unix))]
+compile_error!("runnerctl supports Linux and macOS; on Windows, install it inside WSL2");
+
 mod config;
 mod docker;
 mod github;
