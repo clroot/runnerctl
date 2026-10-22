@@ -160,7 +160,13 @@ fn daemon_socket_and_exclusive_writer() {
     }
     let _guard = Guard(process);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !h.join("manager.sock").exists() {
+    // On Windows the manager records its named pipe in this file instead.
+    let endpoint = h.join(if cfg!(windows) {
+        "manager.pipe"
+    } else {
+        "manager.sock"
+    });
+    while !endpoint.exists() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
