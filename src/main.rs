@@ -1,14 +1,17 @@
-#[cfg(not(unix))]
-compile_error!("runnerctl supports Linux and macOS; on Windows, install it inside WSL2");
+#[cfg(not(any(unix, windows)))]
+compile_error!("runnerctl supports Linux, macOS and Windows");
 
 mod config;
 mod docker;
 mod github;
 mod image;
+mod ipc;
 mod manager;
 mod protocol;
 mod service;
 mod state;
+#[cfg(windows)]
+mod windows;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
@@ -193,6 +196,10 @@ enum ConfigCmd {
 enum ServiceCmd {
     Install,
     Uninstall,
+    /// Run the manager for the Task Scheduler task, logging to manager.log
+    #[cfg(windows)]
+    #[command(hide = true)]
+    Run,
 }
 
 #[tokio::main]
@@ -204,10 +211,7 @@ async fn main() {
 }
 async fn dispatch(paths: &Paths, request: Request) -> Result<Value> {
     // Only fall back after a failed connect, never after an uncertain mutation response.
-    if tokio::net::UnixStream::connect(paths.socket())
-        .await
-        .is_ok()
-    {
+    if ipc::connect(paths).await.is_ok() {
         return manager::send(paths, &request).await;
     }
     let _lock = manager::lock(paths)?;
@@ -218,15 +222,7 @@ async fn dispatch(paths: &Paths, request: Request) -> Result<Value> {
 }
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let home = cli.home.unwrap_or_else(|| {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-            })
-            .join("runnerctl")
-    });
-    let paths = Paths::new(home)?;
+    let paths = Paths::new(cli.home.unwrap_or_else(config::default_home))?;
     paths.prepare()?;
     let mut waiting: Option<(Vec<String>, bool, Duration)> = None;
     let request = match cli.command {
@@ -281,6 +277,8 @@ async fn run() -> Result<()> {
             return match command {
                 ServiceCmd::Install => service::install(&paths),
                 ServiceCmd::Uninstall => service::uninstall(),
+                #[cfg(windows)]
+                ServiceCmd::Run => service::run(paths).await,
             };
         }
         Cmd::Auth {

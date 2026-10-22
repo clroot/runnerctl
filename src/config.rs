@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -327,9 +328,26 @@ impl Paths {
     pub fn config(&self) -> PathBuf {
         self.home.join("config.toml")
     }
+    /// The manager's Unix socket, or on Windows a file naming its named pipe.
     pub fn socket(&self) -> PathBuf {
-        self.home.join("manager.sock")
+        if cfg!(windows) {
+            self.home.join("manager.pipe")
+        } else {
+            self.home.join("manager.sock")
+        }
     }
+}
+/// The default --home: XDG_CONFIG_HOME or ~/.config, or %LOCALAPPDATA% on Windows.
+pub fn default_home() -> PathBuf {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+    };
+    base.unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+    })
+    .join("runnerctl")
 }
 pub fn secure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
@@ -337,19 +355,60 @@ pub fn secure_dir(path: &Path) -> Result<()> {
         !fs::symlink_metadata(path)?.file_type().is_symlink(),
         "directory must not be a symlink"
     );
+    #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    // Resetting a DACL rewrites every inherited entry below it, so do it only once.
+    #[cfg(windows)]
+    if !crate::windows::private_path(path)? {
+        crate::windows::restrict(path, true)?;
+    }
     Ok(())
 }
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path.parent().context("missing parent")?;
     let mut f = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
     f.as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
+    #[cfg(windows)]
+    crate::windows::restrict(f.path(), false)?;
     f.write_all(data)?;
     f.as_file().sync_all()?;
     f.persist(path).map_err(|e| e.error)?;
+    // Windows cannot open a directory as a file; NTFS journals the rename itself.
+    #[cfg(unix)]
     fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+#[cfg(unix)]
+fn open_private(path: &str) -> Result<fs::File> {
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .context("cannot open credential file")?;
+    let meta = f.metadata()?;
+    ensure!(
+        meta.is_file() && meta.permissions().mode() & 0o077 == 0,
+        "credential must be a regular file with mode 0600"
+    );
+    Ok(f)
+}
+#[cfg(windows)]
+fn open_private(path: &str) -> Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    // Opening the reparse point itself makes a symlink fail the regular-file check.
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .context("cannot open credential file")?;
+    ensure!(
+        f.metadata()?.is_file() && crate::windows::private_file(&f)?,
+        "credential must be a regular file only you can access; run icacls \"{path}\" /inheritance:r /grant:r \"%USERNAME%:F\""
+    );
+    Ok(f)
 }
 pub fn credential(auth: &Auth) -> Result<String> {
     let value = secret(&auth.credential, 16384)?;
@@ -361,16 +420,7 @@ pub fn credential(auth: &Auth) -> Result<String> {
 }
 pub fn secret(reference: &str, max_bytes: u64) -> Result<String> {
     let value = if let Some(path) = reference.strip_prefix("file:") {
-        let mut f = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .context("cannot open credential file")?;
-        let meta = f.metadata()?;
-        ensure!(
-            meta.is_file() && meta.permissions().mode() & 0o077 == 0,
-            "credential must be a regular file with mode 0600"
-        );
+        let mut f = open_private(path)?;
         use std::io::Read;
         let mut value = String::new();
         (&mut f).take(max_bytes + 1).read_to_string(&mut value)?;
@@ -456,17 +506,37 @@ mod tests {
             app: None,
         };
         assert_eq!(credential(&auth).unwrap(), "example-secret");
+        #[cfg(unix)]
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        #[cfg(windows)]
+        crate::windows::share(&file);
         assert!(credential(&auth).is_err());
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
-        assert!(
-            credential(&Auth {
-                credential: format!("file:{}", link.display()),
-                app: None,
-            })
-            .is_err()
-        );
+        // Creating symlinks on Windows requires Developer Mode.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(
+                credential(&Auth {
+                    credential: format!("file:{}", link.display()),
+                    app: None,
+                })
+                .is_err()
+            );
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn secure_dir_replaces_inherited_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir(&home).unwrap();
+        crate::windows::share(&home);
+        assert!(!crate::windows::private_path(&home).unwrap());
+        secure_dir(&home).unwrap();
+        assert!(crate::windows::private_path(&home).unwrap());
+        fs::write(home.join("inherited"), b"x").unwrap();
+        assert!(crate::windows::private_path(&home.join("inherited")).unwrap());
     }
     #[test]
     fn shared_labels_warn_but_remain_valid() {

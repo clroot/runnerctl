@@ -4,6 +4,45 @@ use serde_json::Value;
 use std::{io::Write, path::Path, time::Duration};
 use tokio::process::Command;
 
+// The user and group that own runner workspaces on the host. Docker Desktop on Windows
+// maps every container file to the Windows user, so root keeps the runner's defaults.
+#[cfg(unix)]
+fn host_ids() -> (u32, u32) {
+    unsafe { (libc::geteuid(), libc::getegid()) }
+}
+#[cfg(windows)]
+fn host_ids() -> (u32, u32) {
+    (0, 0)
+}
+
+/// The path at which the Docker daemon sees a host path. Docker Desktop on Windows mounts
+/// drive C: at /run/desktop/mnt/host/c in its VM; elsewhere host paths are used as is.
+#[cfg(unix)]
+pub fn daemon_path(path: &Path) -> Result<String> {
+    Ok(path.display().to_string())
+}
+#[cfg(windows)]
+pub fn daemon_path(path: &Path) -> Result<String> {
+    let text = path
+        .to_str()
+        .context("Docker paths must be valid Unicode")?;
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let (drive, rest) = text
+        .split_once(":\\")
+        .filter(|(drive, _)| drive.len() == 1 && drive.chars().all(|c| c.is_ascii_alphabetic()))
+        .with_context(|| {
+            format!(
+                "{} is not on a local drive; Docker socket pools need --home on a drive such as C:",
+                path.display()
+            )
+        })?;
+    Ok(format!(
+        "/run/desktop/mnt/host/{}/{}",
+        drive.to_ascii_lowercase(),
+        rest.replace('\\', "/")
+    ))
+}
+
 pub struct Docker;
 impl Docker {
     async fn command(args: &[String]) -> Result<Vec<u8>> {
@@ -116,7 +155,7 @@ impl Docker {
             && labels["io.runnerctl.run"].as_str() == Some(&run.id)
             && labels["io.runnerctl.pool"].as_str() == Some(&run.pool_id)
     }
-    fn create_args(manager: &str, run: &Run, paths: &Paths) -> Vec<String> {
+    fn create_args(manager: &str, run: &Run, paths: &Paths) -> Result<Vec<String>> {
         let bootstrap = paths.home.join("runs").join(&run.id);
         let mut args: Vec<String> = vec![
             "create".into(),
@@ -176,13 +215,20 @@ impl Docker {
             args.extend(["--network".into(), "host".into()]);
             // The host daemon must see the same runtime/workspace paths as the runner.
             let runtime = bootstrap.join("runtime");
+            let shared = daemon_path(&runtime)?;
+            // The runner starts shell steps from scripts under its root, unquoted.
+            ensure!(
+                !shared.contains(char::is_whitespace),
+                "Docker socket pools need a --home path without spaces: {}",
+                paths.home.display()
+            );
             args.extend([
                 "--volume".into(),
-                format!("{}:{}:Z", runtime.display(), runtime.display()),
+                format!("{}:{shared}:Z", runtime.display()),
                 "--env".into(),
-                format!("RUNNER_ROOT={}", runtime.display()),
+                format!("RUNNER_ROOT={shared}"),
                 "--env".into(),
-                format!("RUNNER_UID={}", unsafe { libc::geteuid() }),
+                format!("RUNNER_UID={}", host_ids().0),
             ]);
             args.extend([
                 "--volume".into(),
@@ -190,13 +236,13 @@ impl Docker {
             ]);
         }
         args.push(run.pool.image.clone());
-        args
+        Ok(args)
     }
     pub async fn create(manager: &str, run: &Run, paths: &Paths) -> Result<()> {
         if run.pool.docker_socket {
             crate::config::secure_dir(&paths.home.join("runs").join(&run.id).join("runtime"))?;
         }
-        let args = Self::create_args(manager, run, paths);
+        let args = Self::create_args(manager, run, paths)?;
         Self::command(&args).await?;
         Ok(())
     }
@@ -240,8 +286,8 @@ impl Docker {
             "-c".into(),
             "chown -hR \"$1:$2\" /cleanup && chmod -R u+rwX /cleanup".into(),
             "--".into(),
-            unsafe { libc::geteuid() }.to_string(),
-            unsafe { libc::getegid() }.to_string(),
+            host_ids().0.to_string(),
+            host_ids().1.to_string(),
         ])
         .await?;
         Ok(())
@@ -319,5 +365,22 @@ impl Docker {
         .await
         .context("diagnostic archive timed out")?;
         result
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    #[test]
+    fn windows_paths_map_to_docker_desktop_vm_paths() {
+        assert_eq!(
+            daemon_path(Path::new(r"C:\Users\me\AppData\Local\runnerctl\runs")).unwrap(),
+            "/run/desktop/mnt/host/c/Users/me/AppData/Local/runnerctl/runs"
+        );
+        assert_eq!(
+            daemon_path(Path::new(r"\\?\D:\runnerctl")).unwrap(),
+            "/run/desktop/mnt/host/d/runnerctl"
+        );
+        assert!(daemon_path(Path::new(r"\\server\share\runnerctl")).is_err());
     }
 }

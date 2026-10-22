@@ -1,3 +1,5 @@
+// Unix only: the fake docker is a shell script, and one client connects to the socket directly.
+#![cfg(unix)]
 use assert_cmd::Command;
 use serde_json::Value;
 use std::{

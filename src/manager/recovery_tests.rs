@@ -246,10 +246,11 @@ async fn docker_root_owned_workspace_is_removed_after_job_completion() {
     config::secure_dir(&directory).unwrap();
     Docker::create(&manager_id, &run, &e.paths).await.unwrap();
     exit_container(&id).await.unwrap();
-    let workspace = directory.join("runtime/_work/root-owned");
     // Docker Desktop and OrbStack file sharing map container files to the host user.
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    {
         use std::os::unix::fs::MetadataExt;
+        let workspace = directory.join("runtime/_work/root-owned");
         assert_eq!(fs::metadata(&workspace).unwrap().uid(), 0);
     }
     assert!(directory.join("completed").exists());
