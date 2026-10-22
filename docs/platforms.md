@@ -58,7 +58,7 @@ instanceIdleTimeout=-1
 
 WSL and Docker Desktop both need a signed-in Windows user. For an unattended PC, enable automatic sign-in, set Docker Desktop to start when you sign in, and start the distribution at sign-in, for example with a Task Scheduler task that runs `wsl.exe -d Ubuntu --exec true`.
 
-The same Docker socket notes as on macOS apply: Docker Desktop maps workspace paths from the distribution for containers that jobs create. With Docker Desktop's default settings, a shell job cannot reach a service container through its published port on `localhost`, because the port is published only on the Windows side. Enable host networking (Settings > Resources > Network) for such jobs, or run them as container jobs and reach services by name. See [compatibility](compatibility.md) for the validated versions.
+The same Docker socket notes as on macOS apply: Docker Desktop maps workspace paths from the distribution for containers that jobs create. With Docker Desktop's default settings, a shell job cannot reach a service container through its published port on `localhost`, because the port is published only on the Windows side. Enable host networking (Settings > Resources > Network); with it, the full [compatibility suite](compatibility.md) passed. Otherwise run such jobs as container jobs and reach services by name. See [compatibility](compatibility.md) for the validated versions.
 
 ### Windows in Command Prompt or PowerShell
 
