@@ -17,33 +17,13 @@ mkdir -p "$root/runtime"
 chmod 700 "$root" "$root/runtime"
 printf '%s' test-token > "$root/token"
 chmod 600 "$root/token"
+# Copy the container script into the shared directory: the repository may not be shared.
+cp "$(dirname "$0")/docker-socket-runner.sh" "$root/socket-test.sh"
 docker run --rm --init --network host --security-opt no-new-privileges:true \
   -e GITHUB_ORG=test-org -e RUNNER_NAME=socket-test -e RUNNER_LABELS=test \
   -e RUNNER_ROOT="$root/runtime" -e RUNNER_UID="$(id -u)" -e SIBLING_IMAGE="$image" \
   -v "$root:/run/runnerctl" -v "$root/runtime:$root/runtime" \
+  -v "$root/socket-test.sh:/socket-test.sh:ro" \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  --entrypoint /bin/bash "$image" -c '
-set -euo pipefail
-cat > /home/runner/actions-runner/config.sh <<"SCRIPT"
-#!/usr/bin/env bash
-set -euo pipefail
-test "$(id -u)" != 0
-test ! -e /run/runnerctl/token
-SCRIPT
-cat > /home/runner/actions-runner/run.sh <<"SCRIPT"
-#!/usr/bin/env bash
-set -euo pipefail
-test "$(id -u)" != 0
-test "$PWD" = "$RUNNER_ROOT"
-docker version >/dev/null
-mkdir -p _work/job
-echo from-runner > _work/job/input
-docker run --rm --network none --entrypoint /bin/sh -v "$RUNNER_ROOT/_work/job:/job" \
-  "$SIBLING_IMAGE" -c "test \"\$(cat /job/input)\" = from-runner && echo from-sibling > /job/output"
-test "$(cat _work/job/output)" = from-sibling
-bash "$ACTIONS_RUNNER_HOOK_JOB_COMPLETED"
-printf "%s\n" "Docker socket: non-root daemon access and same-path workspace binds passed"
-SCRIPT
-exec /entrypoint.sh
-'
+  --entrypoint /bin/bash "$image" /socket-test.sh
 test -f "$root/completed"

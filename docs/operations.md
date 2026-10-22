@@ -2,7 +2,7 @@
 
 ## Configuration and capacity
 
-The default home is `$XDG_CONFIG_HOME/runnerctl` or `~/.config/runnerctl`. It contains configuration, SQLite state, the Unix socket, credential references, per-run files, and archived diagnostics. The manager and CLI must use the same `--home`.
+The default home is `$XDG_CONFIG_HOME/runnerctl` or `~/.config/runnerctl`, and `%LOCALAPPDATA%\runnerctl` on Windows. It contains configuration, SQLite state, the manager socket (on Windows, a file naming its named pipe), credential references, per-run files, and archived diagnostics. The manager and CLI must use the same `--home`.
 
 ```bash
 runnerctl config check
@@ -49,6 +49,7 @@ runnerctl logs RUNNER_ID --pool POOL --follow
 runnerctl doctor
 journalctl --user -u runnerctl.service -f   # Linux and WSL2 service
 tail -f ~/.config/runnerctl/manager.log      # macOS service
+Get-Content -Wait $env:LOCALAPPDATA\runnerctl\manager.log   # Windows service (PowerShell)
 ```
 
 Before deleting a container, the manager archives up to 1 MiB of recent Docker logs and up to 32 MiB of runner diagnostics in `<home>/logs`. Archive failure delays deletion. Docker log rotation keeps three 10 MiB files. Archived files expire after seven days by default; cleanup runs during successful reconciliation of active pools. Follow mode stops when its selected container is replaced; older logs remain in the archive directory.
@@ -84,4 +85,4 @@ Custom entrypoints must:
 
 With `docker_socket = true`, the runner receives the host Docker socket and host network. This is for trusted workflows. Pool labels are routing hints; use GitHub runner groups/repository policies for access control. Shared Docker access allows control over the host and other pools.
 
-The runtime copy uses additional disk per active runner and is removed during normal cleanup. The daemon must see the manager's home at the same path: a local Docker Engine, or Docker Desktop and OrbStack with that folder shared. `doctor` checks this with a bind mount. Rootless/remote Docker, SELinux-enforcing hosts, and arbitrary custom images need separate validation; see [compatibility](compatibility.md).
+The runtime copy uses additional disk per active runner and is removed during normal cleanup. The daemon must see the manager's home at the same path: a local Docker Engine, or Docker Desktop and OrbStack with that folder shared. On native Windows, runnerctl uses the path at which Docker Desktop's VM mounts the drive instead. `doctor` checks this with a bind mount. The runner starts shell steps from scripts under that path without quoting, so these pools need a `--home` path without spaces. Rootless/remote Docker, SELinux-enforcing hosts, and arbitrary custom images need separate validation; see [compatibility](compatibility.md).

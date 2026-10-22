@@ -25,3 +25,11 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --component clippy
       - run: cargo +stable clippy --all-targets --locked -- -D warnings
       - run: cargo +stable test --locked
+  # GitHub-hosted Windows runners have only Windows containers; Docker checks run on a local PC.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component clippy
+      - run: cargo +stable clippy --all-targets --locked -- -D warnings
+      - run: cargo +stable test --locked

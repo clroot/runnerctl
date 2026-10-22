@@ -1,6 +1,6 @@
 # Workflow compatibility
 
-The bundled image is a small Ubuntu runner environment, not a copy of the GitHub-hosted tool cache. Install additional language toolchains in a derived image or use setup actions. Runners are Linux containers. The manager runs on Linux, on macOS, or inside WSL2 on Windows, and needs a Docker daemon that can bind-mount its home directory; see [platforms](platforms.md).
+The bundled image is a small Ubuntu runner environment, not a copy of the GitHub-hosted tool cache. Install additional language toolchains in a derived image or use setup actions. Runners are Linux containers. The manager runs on Linux, on macOS, and on Windows in Command Prompt, PowerShell or WSL2, and needs a Docker daemon that can bind-mount its home directory; see [platforms](platforms.md).
 
 ## Validation record
 
@@ -20,7 +20,12 @@ On 2026-10-22, the local checks passed on macOS 26.6 (Apple silicon, arm64) with
 | Linux amd64 | Docker Engine | Passed in CI | Passed (2026-10-12) |
 | macOS arm64 | OrbStack 2.2.4 | Passed (2026-10-22) | Not run |
 | macOS | Docker Desktop | Not run | Not run |
-| Windows, WSL2 | Docker Desktop | Not run | Not run |
+| Windows amd64, WSL2 | Docker Desktop 4.95.0 | Passed (2026-10-22) | 3 of 4 jobs passed (2026-10-22) |
+| Windows amd64, native | Docker Desktop 4.95.0 | Passed (2026-10-22) | 3 of 4 jobs passed (2026-10-22) |
+
+On 2026-10-22, Windows 11 (build 26300, amd64) with Docker Desktop 4.95.0 (Docker Engine 29.8.2, WSL 2 backend, default settings) ran both Windows setups with Actions runner 2.338.0. In a Fedora WSL2 distribution, the Docker lifecycle and recovery tests, the entrypoint smoke test and the Docker socket test passed. With runnerctl built for Windows, the unit tests, including the access control checks, the Docker lifecycle and recovery tests and `tests\docker-socket.ps1` passed. A PowerShell and Command Prompt session ran the CLI against the manager's named pipe, `doctor`, `service install`, reinstall and `service uninstall`.
+
+The real GitHub suite ran against a repository pool with two Docker socket runners for each setup: the [WSL2 run](https://github.com/eduvil-dev/runnerctl-validation/actions/runs/39761495231) and the [native run](https://github.com/eduvil-dev/runnerctl-validation/actions/runs/39760513652). Checkout, shell and non-root execution, Buildx with workspace binds, and the container job with service DNS passed. The shell job could not reach its PostgreSQL service through the random published port on `127.0.0.1`. With host networking off, Docker Desktop publishes ports only on the Windows side, so a host-network container in its VM cannot reach them. Enable host networking in Docker Desktop (Settings > Resources > Network), or use container jobs to reach services by name. Forced cleanup removed every container and registration in both setups.
 
 The private test repository records the [organization run](https://github.com/eduvil-dev/runnerctl-validation/actions/runs/38200291103) and [repository run](https://github.com/eduvil-dev/runnerctl-validation/actions/runs/38200758703). Access requires repository permission. The reusable fixture is [tests/workflows/compatibility.yml](../tests/workflows/compatibility.yml), with reproduction steps in [tests/README.md](../tests/README.md).
 

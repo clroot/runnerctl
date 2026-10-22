@@ -1,6 +1,6 @@
 # Tests
 
-`cargo test --locked` runs config, state recovery, API mock, CLI and Unix socket tests without real credentials or runner registration.
+`cargo test --locked` runs config, state recovery, API mock, CLI and Unix socket tests without real credentials or runner registration. On Windows it also checks the access control lists that replace Unix file modes; the socket responsiveness tests run only on Unix.
 
 For Docker lifecycle checks:
 
@@ -16,7 +16,7 @@ The test image uses a local completion stub and never connects to GitHub. The ma
 
 The entrypoint smoke test uses the production image with stubbed config/run scripts and networking disabled. It checks non-root execution, short-lived token consumption, ephemeral/update flags and completion hook permissions.
 
-The Docker socket test runs the production entrypoint the way `--docker-socket` pools do: host socket, host network and a same-path workspace under `$HOME`. It checks that the non-root runner can use the daemon and that a container it starts reads and writes the runner's workspace. Run these checks on each Docker runtime before relying on it; see [platforms](../docs/platforms.md).
+The Docker socket test runs the production entrypoint the way `--docker-socket` pools do: host socket, host network and a same-path workspace under `$HOME`. It checks that the non-root runner can use the daemon and that a container it starts reads and writes the runner's workspace. `docker-socket.ps1` does the same for native Windows with Docker Desktop, using the VM path that runnerctl maps the workspace to. Run these checks on each Docker runtime before relying on it; see [platforms](../docs/platforms.md).
 
 The responsiveness tests delay Docker responses and leave a socket client incomplete, then verify that status and stop remain responsive and changed intent prevents stale provisioning. App tests verify RSA signatures, installation token exchange, caching and refresh against a local API server. Test keys in `fixtures/` are public test data.
 

@@ -404,8 +404,13 @@ pub mod tests {
         let auth = app_auth(dir.path());
         verify_jwt(&app_jwt(auth.app.as_ref().unwrap()).unwrap());
         let path = dir.path().join("test-only-app.pem");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        #[cfg(windows)]
+        crate::windows::share(&path);
         assert!(app_jwt(auth.app.as_ref().unwrap()).is_err());
     }
     #[tokio::test]

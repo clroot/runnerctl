@@ -1,13 +1,17 @@
 use crate::config::{Paths, atomic_write};
 use anyhow::{Result, ensure};
-use std::{fs, path::PathBuf, process::Command};
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::{fs, process::Command};
 
 #[cfg(target_os = "macos")]
 pub use launchd::{install, uninstall};
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub use systemd::{install, uninstall};
+#[cfg(windows)]
+pub use task::{install, run, uninstall};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod systemd {
     use super::*;
 
@@ -164,6 +168,138 @@ mod launchd {
         println!(
             "Service disabled. Existing runner containers remain; use stop before uninstall to drain pools."
         );
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+mod task {
+    use super::*;
+    use std::{process::Stdio, time::Duration};
+
+    const NAME: &str = "runnerctl-manager";
+
+    // Task Scheduler expands %VARIABLES% in arguments, and paths cannot contain quotes.
+    fn quote(value: &str) -> Result<String> {
+        ensure!(
+            !value.contains(['"', '%', '\0', '\n', '\r']),
+            "invalid Task Scheduler path: {value}"
+        );
+        // Backslashes before the closing quote would escape it.
+        let trailing = value.len() - value.trim_end_matches('\\').len();
+        Ok(format!("\"{value}{}\"", "\\".repeat(trailing)))
+    }
+    fn escape(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+    fn schtasks(args: &[&str]) -> bool {
+        Command::new("schtasks")
+            .args(args)
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+    // Ending a task that is not running is fine.
+    fn end() {
+        let _ = Command::new("schtasks")
+            .args(["/end", "/tn", NAME])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    pub fn install(paths: &Paths) -> Result<()> {
+        let exe = std::env::current_exe()?;
+        let user = crate::windows::user_sid()?;
+        // A console program started at logon opens a window; headless conhost hides it.
+        let arguments = format!(
+            "--headless {} --home {} service run",
+            quote(&exe.to_string_lossy())?,
+            quote(&paths.home.to_string_lossy())?
+        );
+        let body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n  <RegistrationInfo>\n    <Description>GitHub Actions runner pool manager</Description>\n  </RegistrationInfo>\n  <Triggers>\n    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <UserId>{user}</UserId>\n    </LogonTrigger>\n  </Triggers>\n  <Principals>\n    <Principal id=\"Author\">\n      <UserId>{user}</UserId>\n      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>\n    </Principal>\n  </Principals>\n  <Settings>\n    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n    <RestartOnFailure>\n      <Interval>PT1M</Interval>\n      <Count>999</Count>\n    </RestartOnFailure>\n    <Priority>5</Priority>\n  </Settings>\n  <Actions Context=\"Author\">\n    <Exec>\n      <Command>%SystemRoot%\\System32\\conhost.exe</Command>\n      <Arguments>{}</Arguments>\n    </Exec>\n  </Actions>\n</Task>\n",
+            escape(&arguments)
+        );
+        // schtasks reads task XML as UTF-16 with a byte order mark.
+        let bytes: Vec<u8> = std::iter::once(0xfeff)
+            .chain(body.encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let definition = paths.home.join("service.xml");
+        atomic_write(&definition, &bytes)?;
+        // Replace a running manager so the new definition takes effect, and give it a
+        // moment to exit; a manager that still holds the lock is retried after 10 seconds.
+        end();
+        for _ in 0..50 {
+            if crate::manager::lock(paths).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        ensure!(
+            schtasks(&[
+                "/create",
+                "/tn",
+                NAME,
+                "/xml",
+                &definition.to_string_lossy(),
+                "/f"
+            ]) && schtasks(&["/run", "/tn", NAME]),
+            "schtasks failed; inspect the {NAME} task in Task Scheduler"
+        );
+        println!(
+            "Installed the {NAME} scheduled task. It runs while you are signed in, like Docker Desktop. Logs: {}",
+            paths.home.join("manager.log").display()
+        );
+        Ok(())
+    }
+    pub fn uninstall() -> Result<()> {
+        end();
+        // Keep the task for inspection but do not start it at the next sign-in.
+        ensure!(
+            schtasks(&["/change", "/tn", NAME, "/disable"]),
+            "schtasks failed; inspect the {NAME} task in Task Scheduler"
+        );
+        println!(
+            "Service disabled. Existing runner containers remain; use stop before uninstall to drain pools."
+        );
+        Ok(())
+    }
+    /// The task's entry point: the manager with output in manager.log, restarted on failure.
+    pub async fn run(paths: Paths) -> Result<()> {
+        paths.prepare()?;
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(paths.home.join("manager.log"))?;
+        crate::windows::redirect_output(&log)?;
+        let manager = async {
+            loop {
+                match crate::manager::serve(paths.clone()).await {
+                    Ok(()) => return,
+                    Err(error) => eprintln!("error: {error:#}"),
+                }
+                // Like systemd Restart=on-failure with RestartSec=10.
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        };
+        // Ending the task stops only conhost, so leave with it. Runner state is
+        // persisted, and the next manager reconciles containers as after a crash.
+        // A detached thread, unlike spawn_blocking, does not delay exit while it waits.
+        let (exited, parent) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || exited.send(crate::windows::wait_for_parent()));
+        tokio::select! {
+            _ = manager => {}
+            result = parent => {
+                if let Ok(Err(error)) = result {
+                    eprintln!("error: {error:#}");
+                }
+                let _ = fs::remove_file(paths.socket());
+            }
+        }
         Ok(())
     }
 }

@@ -1,0 +1,5 @@
+# Scripts run in Linux containers and must keep LF endings in Windows checkouts.
+*.sh text eol=lf
+runner/Dockerfile text eol=lf
+tests/Dockerfile text eol=lf
+tests/fixtures/*.pem text eol=lf

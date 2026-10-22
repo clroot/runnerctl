@@ -2,6 +2,7 @@ use crate::{
     config::{self, Config, Paths},
     docker::Docker,
     github::{Github, RemoteRunner},
+    ipc,
     protocol::{Request, Response},
     state::{PoolState, RetryScope, Run, State, Store, now},
 };
@@ -9,15 +10,11 @@ use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    future::Future,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    time::Duration,
-};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::{fs, future::Future, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     sync::{mpsc, oneshot, watch},
 };
 use uuid::Uuid;
@@ -42,14 +39,11 @@ pub fn hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 pub fn lock(paths: &Paths) -> Result<fs::File> {
-    let f = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(paths.home.join("manager.lock"))?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    let f = options.open(paths.home.join("manager.lock"))?;
     f.try_lock_exclusive()
         .context("manager is already running or another command holds the lock")?;
     Ok(f)
@@ -981,17 +975,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     paths.prepare()?;
     let _lock = lock(&paths)?;
     let mut engine = Engine::open(paths.clone())?;
-    if paths.socket().exists() {
-        fs::remove_file(paths.socket())?;
-    }
-    // Socket paths are limited to about 100 bytes (104 on macOS, 108 on Linux).
-    let listener = UnixListener::bind(paths.socket()).with_context(|| {
-        format!(
-            "cannot listen at {}; use a shorter --home path",
-            paths.socket().display()
-        )
-    })?;
-    fs::set_permissions(paths.socket(), fs::Permissions::from_mode(0o600))?;
+    let mut listener = ipc::Listener::bind(&paths)?;
     eprintln!(
         "runnerctl manager listening at {}",
         paths.socket().display()
@@ -1006,7 +990,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
         loop {
             let permit = permits.clone().acquire_owned().await?;
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             let commands = commands.clone();
             let snapshots = snapshot_receiver.clone();
             let github = github.clone();
@@ -1021,10 +1005,11 @@ pub async fn serve(paths: Paths) -> Result<()> {
     });
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let term = terminated()?;
+    tokio::pin!(term);
     let result = loop {
         tokio::select! {
-            _ = term.recv() => break Ok(()),
+            _ = &mut term => break Ok(()),
             _ = tokio::signal::ctrl_c() => break Ok(()),
             envelope = engine.commands.as_mut().unwrap().recv() => {
                 let Some(envelope) = envelope else { break Err(anyhow::anyhow!("request listener stopped")); };
@@ -1039,8 +1024,29 @@ pub async fn serve(paths: Paths) -> Result<()> {
     fs::remove_file(paths.socket())?;
     result
 }
+#[cfg(unix)]
+fn terminated() -> Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    Ok(async move {
+        term.recv().await;
+    })
+}
+// Windows has no SIGTERM; a closed console, Ctrl+Break and shutdown stop the manager.
+#[cfg(windows)]
+fn terminated() -> Result<impl Future<Output = ()>> {
+    use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+    let (mut brk, mut close, mut shutdown) = (ctrl_break()?, ctrl_close()?, ctrl_shutdown()?);
+    Ok(async move {
+        tokio::select! {
+            _ = brk.recv() => {}
+            _ = close.recv() => {}
+            _ = shutdown.recv() => {}
+        }
+    })
+}
 async fn serve_connection(
-    mut stream: UnixStream,
+    mut stream: ipc::Server,
     commands: mpsc::Sender<Envelope>,
     snapshots: watch::Receiver<State>,
     github: Github,
@@ -1081,7 +1087,7 @@ async fn serve_connection(
         let _ = tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes)).await;
     }
 }
-async fn read_request(stream: &mut UnixStream) -> Result<Request> {
+async fn read_request(stream: &mut (impl AsyncRead + Unpin)) -> Result<Request> {
     use tokio::io::AsyncReadExt;
     let mut line = String::new();
     BufReader::new(stream.take(1024 * 1024 + 1))
@@ -1094,7 +1100,7 @@ async fn read_request(stream: &mut UnixStream) -> Result<Request> {
     Ok(serde_json::from_str(&line)?)
 }
 pub async fn send(paths: &Paths, request: &Request) -> Result<Value> {
-    let mut stream = UnixStream::connect(paths.socket())
+    let mut stream = ipc::connect(paths)
         .await
         .context("manager is not running; run runnerctl manager or service install")?;
     let mut bytes = serde_json::to_vec(request)?;

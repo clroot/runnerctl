@@ -24,7 +24,7 @@ For automation, feed a token through stdin (`--token-stdin`) or reference an exi
 runnerctl auth login --profile team --env TEAM_RUNNER_TOKEN
 ```
 
-The variable must exist in the **manager's** environment. A systemd user service or macOS LaunchAgent does not automatically inherit shell variables; file credentials are usually easier for services. New token files use mode 0600, and configuration contains only their references. Old unreferenced files are retained for deliberate cleanup after rotation.
+The variable must exist in the **manager's** environment. A systemd user service, macOS LaunchAgent or Windows scheduled task does not inherit shell variables; the Windows task sees only your account's environment variables. File credentials are usually easier for services. New token files use mode 0600 (on Windows, access for you, SYSTEM and Administrators only), and configuration contains only their references. Old unreferenced files are retained for deliberate cleanup after rotation.
 
 ## GitHub App installations
 
