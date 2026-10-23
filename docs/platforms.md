@@ -66,6 +66,8 @@ The same Docker socket notes as on macOS apply: Docker Desktop maps workspace pa
 2. Install Rust/Cargo 1.85 or later with [rustup](https://rustup.rs) and the Visual Studio C++ build tools it offers, then run `cargo install runnerctl --locked` and `runnerctl image pull`.
 3. Follow the [first runner](../README.md#your-first-runner) steps in Command Prompt or PowerShell.
 
+When Smart App Control is on (Windows Security > App & browser control), Windows can refuse to start `runnerctl.exe` with "An Application Control policy has blocked this file", because a program you build yourself has no signature or reputation. Smart App Control has no per-program exception; use the WSL2 setup instead, or turn Smart App Control off.
+
 The default home is `%LOCALAPPDATA%\runnerctl`. When runnerctl first uses a home directory, it replaces the inherited permissions with access for you, SYSTEM and Administrators only, the counterpart of mode 0700. Credential and private key files referenced with `file:` need the same restriction. This command sets it:
 
 ```powershell

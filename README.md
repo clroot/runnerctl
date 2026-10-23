@@ -19,9 +19,22 @@ build                octocat/project    running         1      1      0      1  
 
 The manager restores state after a restart, replaces completed runners, and preserves running jobs during normal stopping and upgrades. Capacity is configured per pool. This is a single-host manager for trusted workflows; pool labels and shared Docker access do not isolate tenants.
 
+## Supported platforms
+
+Runners are always Linux containers; on macOS and Windows they run in Docker's Linux VM. The manager and CLI run on:
+
+| Host | Docker | Background service | Validation |
+| --- | --- | --- | --- |
+| Linux | Docker Engine | systemd user service | Full GitHub suite |
+| macOS | OrbStack or Docker Desktop | LaunchAgent | Local Docker checks with OrbStack |
+| Windows: Command Prompt or PowerShell | Docker Desktop | Scheduled task | Full GitHub suite |
+| Windows: WSL2 | Docker Desktop | systemd user service | Full GitHub suite |
+
+See [macOS and Windows](docs/platforms.md) for setup, and the [compatibility record](docs/compatibility.md) for tested versions and limits.
+
 ## Install with Cargo
 
-On the Docker host, install Rust/Cargo 1.85 or later and a C compiler/linker. Docker must be running, and your user must be able to access its local socket. On a Mac or Windows PC, read [macOS and Windows](docs/platforms.md) first. On Windows, runnerctl runs in Command Prompt or PowerShell, or inside WSL2.
+On the Docker host, install Rust/Cargo 1.85 or later and a C compiler/linker. Docker must be running, and your user must be able to access its local socket. On a Mac or Windows PC, read [macOS and Windows](docs/platforms.md) first. The commands below work the same in PowerShell and Command Prompt.
 
 ```bash
 cargo install runnerctl --locked
@@ -29,7 +42,7 @@ runnerctl --version
 runnerctl image pull
 ```
 
-The CLI comes from crates.io. `image pull` downloads the matching versioned runner image from GHCR; releases build images for Linux amd64 and arm64. Add `~/.cargo/bin` to `PATH` if needed. Repeat `cargo install runnerctl --locked` to update the CLI.
+The CLI comes from crates.io. `image pull` downloads the matching versioned runner image from GHCR; releases build images for Linux amd64 and arm64. Add `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows) to `PATH` if needed. Repeat `cargo install runnerctl --locked` to update the CLI.
 
 ## Your first runner
 
@@ -47,7 +60,7 @@ runnerctl status --pool ci
 
 `auth login` reads a PAT without echoing it. A fine-grained organization PAT needs **Self-hosted runners: Read and write**, plus any organization approval. See [authentication](docs/authentication.md) for GitHub Apps and automation.
 
-`service install` starts a systemd user service on Linux and WSL2, a LaunchAgent on macOS, or a scheduled task on Windows. On Linux, keep it running after logout by enabling lingering with `sudo loginctl enable-linger "$USER"`. You can also run `runnerctl manager` in another terminal. Commands and the manager must use the same `--home` directory.
+`service install` starts a systemd user service on Linux and WSL2, a LaunchAgent on macOS, or a scheduled task on Windows. On Linux, keep it running after logout by enabling lingering with `sudo loginctl enable-linger "$USER"`. You can also run `runnerctl manager` in another terminal. Commands and the manager must use the same `--home` directory. The default is `~/.config/runnerctl`, or `%LOCALAPPDATA%\runnerctl` on Windows.
 
 Add this workflow to a repository accessible to the organization runner, then run it from GitHub Actions:
 
