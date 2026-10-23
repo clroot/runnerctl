@@ -1,6 +1,6 @@
 # Releases and runner maintenance
 
-The CLI is distributed through crates.io. Runner images are distributed through GHCR using the matching CLI tag (`ghcr.io/clroot/runnerctl-runner:v0.2.0`). No downloadable CLI binaries are produced.
+The CLI is distributed through crates.io. Runner images are distributed through GHCR using the matching CLI tag (`ghcr.io/clroot/runnerctl-runner:v0.3.0`). No downloadable CLI binaries are produced.
 
 ## Publish
 
