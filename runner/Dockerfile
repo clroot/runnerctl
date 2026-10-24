@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-ARG RUNNER_VERSION=2.338.0
+ARG RUNNER_VERSION=2.338.1
 ARG TARGETARCH
 ARG RUNNER_SHA256
 LABEL io.runnerctl.runner.version=$RUNNER_VERSION
@@ -51,11 +51,11 @@ RUN BUILD_ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && curl -fsSL -o runner.tar.gz \
     "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz" \
     && if [ -z "${RUNNER_SHA256}" ]; then \
-      test "${RUNNER_VERSION}" = "2.338.0"; \
+      test "${RUNNER_VERSION}" = "2.338.1"; \
       case "${RUNNER_ARCH}" in \
-        x64) RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32 ;; \
-        arm64) RUNNER_SHA256=628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b ;; \
-        arm) RUNNER_SHA256=1d6a7688d2aca1a1fecd4df5d473e4aa4226c1f1785ff915cf84049665a3483f ;; \
+        x64) RUNNER_SHA256=08e9ccb3604d2462c24b5e33604dc30810296ca15cc65f23cffd4317eb144c37 ;; \
+        arm64) RUNNER_SHA256=475e0c149fd3b611610127b9664ba5bacf5c6928795cc448ab520bb5f324bede ;; \
+        arm) RUNNER_SHA256=c338153388f2ac5b5610b28dc38979680b204be82a7edd8e45106d60f2c24e0c ;; \
       esac; \
     fi \
     && echo "${RUNNER_SHA256}  runner.tar.gz" | sha256sum --check --strict \
