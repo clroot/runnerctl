@@ -40,7 +40,7 @@ Stopping the manager does not stop containers. Restart recovery uses SQLite and 
 
 Observation errors produce `unknown` instead of deleting a live container. Failed pools use bounded exponential backoff with jitter, up to 600 seconds. Unexpected exits pause provisioning while observation and cleanup continue. A reboot of the Docker host is distinguished from a runner failure, allowing immediate replacement of its stopped containers. On Docker Desktop, OrbStack and WSL2 the Docker host is a Linux VM that can restart without the computer rebooting, so the manager reads its boot time from a short-lived container of the runner image. Normal completion requires both the completion marker and container exit.
 
-GitHub rate limits and authentication failures pause every pool that shares the credential. Other GitHub API errors back off only the affected pool. Renaming or transferring a repository does not break its pool: GitHub's API redirects are followed, but only within the API origin, so the token is never sent to another host.
+GitHub rate limits and authentication failures pause every pool that shares the credential. Other GitHub API errors back off only the affected pool. After a repository is renamed or transferred, the manager can still observe, clean up and remove the pool's existing runners: GitHub's API redirects are followed, but only within the API origin, so the token is never sent to another host. New runners cannot register under the old name: stop the pool with `--wait`, then change `repository` and run `config apply`, or remove the pool and add it again.
 
 A live but unresponsive runner can remain unknown. Inspect diagnostics, then explicitly stop with `--force` and restart if needed. No timeout automatically cancels work.
 
@@ -66,7 +66,7 @@ GitHub's [update policy](https://docs.github.com/en/actions/reference/runners/se
 cargo install runnerctl --locked
 runnerctl image pull
 # Use the version tag matching the newly installed CLI.
-runnerctl upgrade --pool ci --image ghcr.io/clroot/runnerctl-runner:v0.3.0
+runnerctl upgrade --pool ci --image ghcr.io/clroot/runnerctl-runner:v0.3.1
 runnerctl doctor
 ```
 
