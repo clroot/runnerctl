@@ -40,6 +40,8 @@ Stopping the manager does not stop containers. Restart recovery uses SQLite and 
 
 Observation errors produce `unknown` instead of deleting a live container. Failed pools use bounded exponential backoff with jitter, up to 600 seconds. Unexpected exits pause provisioning while observation and cleanup continue. A reboot of the Docker host is distinguished from a runner failure, allowing immediate replacement of its stopped containers. On Docker Desktop, OrbStack and WSL2 the Docker host is a Linux VM that can restart without the computer rebooting, so the manager reads its boot time from a short-lived container of the runner image. Normal completion requires both the completion marker and container exit.
 
+GitHub rate limits and authentication failures pause every pool that shares the credential. Other GitHub API errors back off only the affected pool. Renaming or transferring a repository does not break its pool: GitHub's API redirects are followed, but only within the API origin, so the token is never sent to another host.
+
 A live but unresponsive runner can remain unknown. Inspect diagnostics, then explicitly stop with `--force` and restart if needed. No timeout automatically cancels work.
 
 ## Logs
