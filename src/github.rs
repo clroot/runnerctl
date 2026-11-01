@@ -96,13 +96,27 @@ fn auth_key(profile: &str, auth: &Auth) -> String {
 }
 impl Github {
     pub fn new() -> Result<Self> {
+        Self::with_base("https://api.github.com".into())
+    }
+    fn with_base(base: String) -> Result<Self> {
+        // Renamed or transferred repositories answer with 301 (GET) or 307 (other methods)
+        // pointing at /repositories/{id}. Follow those only within the API origin so the
+        // bearer token is never sent anywhere else.
+        let origin = reqwest::Url::parse(&base)?.origin();
+        let redirect = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 || attempt.url().origin() != origin {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        });
         Ok(Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(15))
-                .redirect(reqwest::redirect::Policy::none())
+                .redirect(redirect)
                 .user_agent(concat!("runnerctl/", env!("CARGO_PKG_VERSION")))
                 .build()?,
-            base: "https://api.github.com".into(),
+            base,
             state: Arc::new(Mutex::new(Cache::default())),
         })
     }
@@ -251,31 +265,38 @@ impl Github {
             .get("x-ratelimit-reset")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
+        // Rate limits and credential failures apply to every pool using the credential.
+        // Other errors belong to one scope (e.g. a deleted repository) and are backed off
+        // per pool by the manager, so they must not block healthy pools.
         let (wait, message) =
             if status == StatusCode::TOO_MANY_REQUESTS || remaining == Some("0") || delay.is_some()
             {
                 (
-                    delay
-                        .unwrap_or_else(|| reset.unwrap_or(now() + 60).saturating_sub(now()))
-                        .max(1),
+                    Some(
+                        delay
+                            .unwrap_or_else(|| reset.unwrap_or(now() + 60).saturating_sub(now()))
+                            .max(1),
+                    ),
                     format!("{context} rate limit"),
                 )
             } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 (
-                    300,
+                    Some(300),
                     format!("{context} authentication/permission error ({status})"),
                 )
             } else {
-                (30, format!("{context} API error ({status})"))
+                (None, format!("{context} API error ({status})"))
             };
         let mut state = self.state.lock().unwrap();
         if state.generation == generation {
             if status == StatusCode::UNAUTHORIZED {
                 state.installation_tokens.remove(&key);
             }
-            state
-                .blocked
-                .insert(key, (now().saturating_add(wait), message.clone()));
+            if let Some(wait) = wait {
+                state
+                    .blocked
+                    .insert(key, (now().saturating_add(wait), message.clone()));
+            }
         }
         anyhow!("{message}")
     }
@@ -353,9 +374,7 @@ impl Github {
 #[cfg(test)]
 impl Github {
     pub fn testing(base: String) -> Self {
-        let mut g = Self::new().unwrap();
-        g.base = base;
-        g
+        Self::with_base(base).unwrap()
     }
 }
 #[cfg(test)]
@@ -560,6 +579,159 @@ pub mod tests {
             }
         });
         (base, task)
+    }
+    fn pat_auth(dir: &std::path::Path) -> Auth {
+        let path = dir.join("token");
+        crate::config::atomic_write(&path, b"test-pat").unwrap();
+        Auth {
+            credential: format!("file:{}", path.display()),
+            app: None,
+        }
+    }
+    /// Serves canned replies by request line and records each request line with its bearer token.
+    async fn scripted_server(
+        reply: impl Fn(&str, &str) -> (String, String) + Send + Sync + 'static,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<(String, String)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(vec![]));
+        let log = seen.clone();
+        let reply = Arc::new(reply);
+        let origin = base.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut reader = BufReader::new(stream);
+                let mut first = String::new();
+                reader.read_line(&mut first).await.unwrap();
+                let mut bearer = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if line
+                        .to_ascii_lowercase()
+                        .starts_with("authorization: bearer ")
+                    {
+                        bearer = line.trim()[22..].to_owned();
+                    }
+                }
+                let first = first.trim().to_owned();
+                log.lock().unwrap().push((first.clone(), bearer));
+                let (status, extra) = reply(&first, &origin);
+                let body = if status.starts_with("200") {
+                    json!({"total_count":0,"runners":[]}).to_string()
+                } else {
+                    String::new()
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        (base, seen, task)
+    }
+    #[tokio::test]
+    async fn renamed_repository_redirects_are_followed_on_the_api_origin() {
+        let (base, seen, task) = scripted_server(|first, origin| {
+            if first.contains("/repos/clroot/old-name/actions/runners/7") {
+                // GitHub answers non-GET requests to a renamed repository with 307.
+                (
+                    "307 Temporary Redirect".into(),
+                    format!("Location: {origin}/repositories/42/actions/runners/7\r\n"),
+                )
+            } else if first.contains("/repos/clroot/old-name/") {
+                (
+                    "301 Moved Permanently".into(),
+                    format!(
+                        "Location: {origin}/repositories/42/actions/runners?per_page=100&page=1\r\n"
+                    ),
+                )
+            } else if first.starts_with("DELETE") {
+                ("204 No Content".into(), String::new())
+            } else {
+                ("200 OK".into(), String::new())
+            }
+        })
+        .await;
+        let g = Github::testing(base);
+        let dir = tempfile::tempdir().unwrap();
+        let auth = pat_auth(dir.path());
+        assert!(
+            g.list("p", &auth, "/repos/clroot/old-name", 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        g.remove("p", &auth, "/repos/clroot/old-name", 7)
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap().clone();
+        let lines: Vec<&str> = seen.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(lines[1].starts_with("GET /repositories/42/actions/runners"));
+        assert!(lines[3].starts_with("DELETE /repositories/42/actions/runners/7"));
+        assert!(seen.iter().all(|(_, bearer)| bearer == "test-pat"));
+        task.abort();
+    }
+    #[tokio::test]
+    async fn redirects_to_another_origin_are_not_followed() {
+        let (elsewhere, foreign, foreign_task) =
+            scripted_server(|_, _| ("200 OK".into(), String::new())).await;
+        let (base, _, task) = scripted_server(move |_, _| {
+            (
+                "301 Moved Permanently".into(),
+                format!("Location: {elsewhere}/repositories/42/actions/runners\r\n"),
+            )
+        })
+        .await;
+        let g = Github::testing(base);
+        let dir = tempfile::tempdir().unwrap();
+        let auth = pat_auth(dir.path());
+        let error = g
+            .list("p", &auth, "/repos/clroot/old-name", 0)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("301"));
+        assert!(foreign.lock().unwrap().is_empty());
+        task.abort();
+        foreign_task.abort();
+    }
+    #[tokio::test]
+    async fn scope_errors_do_not_block_other_scopes_sharing_a_credential() {
+        let (base, _, task) = scripted_server(|first, _| {
+            if first.contains("/repos/clroot/broken/") {
+                ("410 Gone".into(), String::new())
+            } else {
+                ("200 OK".into(), String::new())
+            }
+        })
+        .await;
+        let g = Github::testing(base);
+        let dir = tempfile::tempdir().unwrap();
+        let auth = pat_auth(dir.path());
+        assert!(g.list("p", &auth, "/repos/clroot/broken", 0).await.is_err());
+        assert!(
+            g.list("p", &auth, "/repos/clroot/healthy", 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        task.abort();
     }
     #[tokio::test]
     async fn api_tokens_and_profile_isolation() {
