@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     jq \
     procps \
+    ruby \
     unzip \
     zip \
     && rm -rf /var/lib/apt/lists/*
