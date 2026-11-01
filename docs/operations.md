@@ -74,7 +74,7 @@ Existing pools retain their configured images when the CLI is updated. The repos
 
 ## Custom images and Docker workflows
 
-Extend `runner/Dockerfile` or the published image to install additional toolchains. The base includes Ubuntu, Git, curl, jq, Docker CLI, Buildx, and Compose. It does not mirror the full GitHub-hosted tool cache.
+Extend `runner/Dockerfile` or the published image to install additional toolchains. The base includes Ubuntu, Git, curl, jq, Ruby, Docker CLI, Buildx, and Compose. It does not mirror the full GitHub-hosted tool cache.
 
 Custom entrypoints must:
 
