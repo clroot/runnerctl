@@ -6,6 +6,8 @@ ARG RUNNER_SHA256
 LABEL io.runnerctl.runner.version=$RUNNER_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Ubuntu images set no locale; tools such as Ruby then read UTF-8 sources as US-ASCII.
+ENV LANG=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
