@@ -78,6 +78,10 @@ pub struct Pool {
     pub image: String,
     #[serde(default)]
     pub docker_socket: bool,
+    /// Let processes in the runner container gain privileges (for example through sudo).
+    /// Runner containers otherwise start with `no-new-privileges`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_privilege_escalation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,6 +464,7 @@ mod tests {
             replicas: 4,
             image: default_image(),
             docker_socket: false,
+            allow_privilege_escalation: false,
             cpus: None,
             memory: None,
         });
@@ -476,6 +481,17 @@ mod tests {
         assert_eq!(Config::parse(&toml::to_string(&c).unwrap()).unwrap(), c);
         c.manager.max_runners = 5;
         assert!(c.validate().is_err());
+    }
+    #[test]
+    fn privilege_escalation_defaults_off_and_is_omitted_until_enabled() {
+        let mut c = fixture();
+        let text = toml::to_string(&c).unwrap();
+        assert!(!text.contains("allow_privilege_escalation"));
+        assert!(!Config::parse(&text).unwrap().pools[0].allow_privilege_escalation);
+        c.pools[0].allow_privilege_escalation = true;
+        let text = toml::to_string(&c).unwrap();
+        assert!(text.contains("allow_privilege_escalation = true"));
+        assert_eq!(Config::parse(&text).unwrap(), c);
     }
     #[test]
     fn reject_ambiguous_and_unsafe_config() {

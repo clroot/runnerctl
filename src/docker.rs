@@ -167,9 +167,10 @@ impl Docker {
             "max-size=10m".into(),
             "--log-opt".into(),
             "max-file=3".into(),
-            "--security-opt".into(),
-            "no-new-privileges:true".into(),
         ];
+        if !run.pool.allow_privilege_escalation {
+            args.extend(["--security-opt".into(), "no-new-privileges:true".into()]);
+        }
         if let Some(cpus) = run.pool.cpus {
             args.extend(["--cpus".into(), cpus.to_string()]);
         }
@@ -371,6 +372,49 @@ impl Docker {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use crate::config::Pool;
+
+    fn run(allow_privilege_escalation: bool) -> Run {
+        Run {
+            id: "rc-test".into(),
+            pool_id: "pool-id".into(),
+            pool: Pool {
+                name: "build".into(),
+                organization: String::new(),
+                repository: Some("octocat/project".into()),
+                auth: "team".into(),
+                labels: vec!["build".into()],
+                runner_group: "Default".into(),
+                replicas: 1,
+                image: crate::config::default_image(),
+                docker_socket: false,
+                allow_privilege_escalation,
+                cpus: None,
+                memory: None,
+            },
+            generation: 1,
+            created_at: 0,
+            phase: "creating".into(),
+            remote_id: None,
+            retiring: false,
+            force: false,
+            completed_job: false,
+            log_saved: false,
+        }
+    }
+
+    #[test]
+    fn runner_containers_block_privilege_escalation_unless_the_pool_allows_it() {
+        let paths = Paths::new(std::env::temp_dir().join("runnerctl-args-test")).unwrap();
+        let blocked = Docker::create_args("manager", &run(false), &paths).unwrap();
+        assert!(
+            blocked
+                .windows(2)
+                .any(|w| w == ["--security-opt", "no-new-privileges:true"])
+        );
+        let allowed = Docker::create_args("manager", &run(true), &paths).unwrap();
+        assert!(!allowed.iter().any(|a| a.contains("no-new-privileges")));
+    }
     #[test]
     fn windows_paths_map_to_docker_desktop_vm_paths() {
         assert_eq!(

@@ -74,7 +74,7 @@ Existing pools retain their configured images when the CLI is updated. The repos
 
 ## Custom images and Docker workflows
 
-Extend `runner/Dockerfile` or the published image to install additional toolchains. The base includes Ubuntu, Git, curl, jq, Ruby, Docker CLI, Buildx, and Compose. Jobs run as the non-root `runner` user with passwordless `sudo`, as on GitHub-hosted runners. It does not mirror the full GitHub-hosted tool cache.
+Extend `runner/Dockerfile` or the published image to install additional toolchains. The base includes Ubuntu, Git, curl, jq, Ruby, Docker CLI, Buildx, and Compose. Jobs run as the non-root `runner` user. The image grants that user passwordless `sudo`, as on GitHub-hosted runners, but runner containers start with `no-new-privileges`, which blocks it. Set `allow_privilege_escalation = true` on a pool (or `pool add --allow-privilege-escalation`) to let its jobs use `sudo`, for example for `sudo apt-get install` or `playwright install --with-deps`. It does not mirror the full GitHub-hosted tool cache.
 
 Custom entrypoints must:
 
@@ -84,6 +84,8 @@ Custom entrypoints must:
 - Set `io.runnerctl.runner.version` to the installed upstream runner version for diagnostics.
 - When `RUNNER_ROOT` is set, keep the runner runtime and workspace at that absolute path. The manager mounts the same path on the host and in the runner so sibling containers can access workspaces and JavaScript runtimes. The provided entrypoint copies the runtime into that per-run directory and accepts `RUNNER_UID` for cleanup ownership.
 - Include `/bin/sh`, `chown`, and `chmod`. When a job leaves root-owned workspace files, the manager uses the same image in a temporary container to restore ownership before removing that run's directory. This helper has no network or Docker socket and mounts only the stopped runner's directory.
+
+`allow_privilege_escalation = true` drops `no-new-privileges` from that pool's runner containers only; cleanup helpers keep it. Jobs can then become root inside their runner container. Without `docker_socket` this stays inside the container; with it, the pool is already host-root equivalent. Changing the setting creates a new runner generation.
 
 With `docker_socket = true`, the runner receives the host Docker socket and host network. This is for trusted workflows. Pool labels are routing hints; use GitHub runner groups/repository policies for access control. Shared Docker access allows control over the host and other pools.
 
