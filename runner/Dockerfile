@@ -38,10 +38,10 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # runner 전용 사용자
-# Like GitHub-hosted runners, jobs may use passwordless sudo (for example
-# `playwright install --with-deps` or `sudo apt-get install`). It grants root
-# inside this ephemeral container only; Docker socket pools are already
-# host-root equivalent.
+# Like GitHub-hosted runners, the runner user has passwordless sudo (for example
+# for `playwright install --with-deps` or `sudo apt-get install`). runnerctl
+# starts runners with no-new-privileges, which blocks sudo unless the pool sets
+# allow_privilege_escalation = true.
 RUN groupadd -f docker \
     && useradd -m -s /bin/bash runner \
     && usermod -aG docker runner \

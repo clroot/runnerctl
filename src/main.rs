@@ -165,6 +165,9 @@ enum PoolCmd {
         image: String,
         #[arg(long)]
         docker_socket: bool,
+        /// Allow processes in runner containers to gain privileges, for example through sudo
+        #[arg(long)]
+        allow_privilege_escalation: bool,
         /// CPU quota for each runner container (for example 2 or 0.5)
         #[arg(long)]
         cpus: Option<f64>,
@@ -369,6 +372,7 @@ async fn run() -> Result<()> {
                 runner_group,
                 image,
                 docker_socket,
+                allow_privilege_escalation,
                 cpus,
                 memory,
             } => Request::Add {
@@ -382,6 +386,7 @@ async fn run() -> Result<()> {
                     runner_group,
                     image,
                     docker_socket,
+                    allow_privilege_escalation,
                     cpus,
                     memory,
                 },

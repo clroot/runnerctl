@@ -191,6 +191,7 @@ fn fixture() -> anyhow::Result<(tempfile::TempDir, Engine)> {
         replicas: 3,
         image: "local/runnerctl-test:1".into(),
         docker_socket: false,
+        allow_privilege_escalation: false,
         cpus: None,
         memory: None,
     });

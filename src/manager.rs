@@ -363,6 +363,7 @@ impl Engine {
                             || old.labels != new.labels
                             || old.runner_group != new.runner_group
                             || old.docker_socket != new.docker_socket
+                            || old.allow_privilege_escalation != new.allow_privilege_escalation
                             || old.cpus != new.cpus
                             || old.memory != new.memory
                         {
@@ -1153,6 +1154,7 @@ mod tests {
                 replicas,
                 image: config::default_image(),
                 docker_socket: false,
+                allow_privilege_escalation: false,
                 cpus: None,
                 memory: None,
             });

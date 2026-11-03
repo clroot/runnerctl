@@ -36,6 +36,7 @@ runner_group = "Default"
 replicas = 2
 image = "ghcr.io/clroot/runnerctl-runner:v0.3.1"
 docker_socket = true
+# allow_privilege_escalation = true # Let jobs use sudo (e.g. apt-get, playwright --with-deps).
 cpus = 2.0
 memory = "2g" # Applies to runners, not sibling job/service containers.
 
