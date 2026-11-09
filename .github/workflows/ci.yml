@@ -1,5 +1,13 @@
 name: CI
-on: [push, pull_request, workflow_dispatch]
+on:
+  # Branch pushes are covered by pull_request; only main gets its own push run.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
