@@ -231,8 +231,11 @@ async fn run() -> Result<()> {
     let request = match cli.command {
         Cmd::Init { org, repo } => {
             let _lock = manager::lock(&paths)?;
+            let db = paths.home.join("state.sqlite");
+            // Earlier releases left an empty database when the manager started before init.
             ensure!(
-                !paths.config().exists() && !paths.home.join("state.sqlite").exists(),
+                !paths.config().exists()
+                    && (!db.exists() || state::Store::open(&db)?.load()?.is_none()),
                 "already initialized"
             );
             if let Some(org) = &org {
