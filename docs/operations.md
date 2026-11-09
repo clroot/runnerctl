@@ -66,7 +66,7 @@ GitHub's [update policy](https://docs.github.com/en/actions/reference/runners/se
 cargo install runnerctl --locked
 runnerctl image pull
 # Use the version tag matching the newly installed CLI.
-runnerctl upgrade --pool ci --image ghcr.io/clroot/runnerctl-runner:v0.4.1
+runnerctl upgrade --pool ci --image ghcr.io/clroot/runnerctl-runner:v0.4.2
 runnerctl doctor
 ```
 
