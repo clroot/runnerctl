@@ -58,7 +58,7 @@ RUN BUILD_ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
       x64) RUNNER_ARCH=x64 ;; \
       *) echo "Unsupported TARGETARCH: ${BUILD_ARCH}" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL -o runner.tar.gz \
+    && curl -fsSL --retry 8 --retry-all-errors --retry-delay 15 -o runner.tar.gz \
     "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz" \
     && if [ -z "${RUNNER_SHA256}" ]; then \
       test "${RUNNER_VERSION}" = "2.338.2"; \
