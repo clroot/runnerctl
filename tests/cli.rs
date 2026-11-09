@@ -186,3 +186,32 @@ fn daemon_socket_and_exclusive_writer() {
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["pools"][0]["intent"], "stopped");
 }
+
+#[test]
+fn manager_before_init_does_not_block_init() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = dir.path();
+    cmd(h)
+        .args(["auth", "login", "--profile", "example", "--token-stdin"])
+        .write_stdin("not-a-real-pat\n")
+        .assert()
+        .failure();
+    assert!(!h.join("state.sqlite").exists());
+    cmd(h).args(["init", "--org", "example"]).assert().success();
+    cmd(h).args(["config", "check"]).assert().success();
+}
+
+#[test]
+fn init_accepts_an_empty_state_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = dir.path();
+    rusqlite::Connection::open(h.join("state.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);",
+        )
+        .unwrap();
+    cmd(h).args(["init", "--org", "example"]).assert().success();
+    cmd(h).args(["init", "--org", "example"]).assert().failure();
+    cmd(h).args(["start", "--all"]).assert().success();
+}

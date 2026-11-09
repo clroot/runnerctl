@@ -62,7 +62,13 @@ pub struct Engine {
 }
 impl Engine {
     pub fn open(paths: Paths) -> Result<Self> {
-        let store = Store::open(&paths.home.join("state.sqlite"))?;
+        let db = paths.home.join("state.sqlite");
+        // Opening creates the database, and init refuses a home that has one.
+        ensure!(
+            db.exists() || paths.config().exists(),
+            "run runnerctl init first"
+        );
+        let store = Store::open(&db)?;
         let state = match store.load()? {
             Some(state) => state,
             None => {
