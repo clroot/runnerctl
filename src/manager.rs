@@ -372,6 +372,7 @@ impl Engine {
                             || old.allow_privilege_escalation != new.allow_privilege_escalation
                             || old.cpus != new.cpus
                             || old.memory != new.memory
+                            || old.env != new.env
                         {
                             ps.generation += 1;
                         }
@@ -1163,6 +1164,7 @@ mod tests {
                 allow_privilege_escalation: false,
                 cpus: None,
                 memory: None,
+                env: Default::default(),
             });
         }
         config::atomic_write(&paths.config(), toml::to_string(&c).unwrap().as_bytes()).unwrap();
@@ -1427,6 +1429,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(e.state.config.pools[0].replicas, 5);
+    }
+    #[tokio::test]
+    async fn env_changes_start_a_new_runner_generation() {
+        let (_dir, mut e) = fixture();
+        let before = e.state.pools["validate"].generation;
+        let mut c = e.state.config.clone();
+        c.pools[0].env.insert(
+            "JAVA_TOOL_OPTIONS".into(),
+            "-Djava.net.preferIPv4Stack=true".into(),
+        );
+        let text = toml::to_string(&c).unwrap();
+        config::atomic_write(&e.paths.config(), text.as_bytes()).unwrap();
+        e.handle(Request::Apply { text, revision: 1 })
+            .await
+            .unwrap();
+        assert_eq!(e.state.pools["validate"].generation, before + 1);
+        assert_eq!(e.state.config.pools[0].env, c.pools[0].env);
     }
     #[tokio::test]
     async fn organization_change_requires_fully_stopped_pool() {

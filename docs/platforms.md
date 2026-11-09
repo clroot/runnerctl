@@ -60,6 +60,18 @@ WSL and Docker Desktop both need a signed-in Windows user. For an unattended PC,
 
 The same Docker socket notes as on macOS apply: Docker Desktop maps workspace paths from the distribution for containers that jobs create. With Docker Desktop's default settings, a shell job cannot reach a service container through its published port on `localhost`, because the port is published only on the Windows side. Enable host networking (Settings > Resources > Network); with it, the full [compatibility suite](compatibility.md) passed. Otherwise run such jobs as container jobs and reach services by name. See [compatibility](compatibility.md) for the validated versions.
 
+#### Java and Gradle builds
+
+With host networking on, Docker Desktop 4.95.0 (WSL2 backend) does not route a JVM's connection to `127.0.0.1` inside a host-network runner. Java opens IPv6 sockets and connects to the IPv4-mapped address, so a JVM cannot reach a port that another process in the same runner listens on, although other programs can. Gradle fails with `Could not connect to the Gradle daemon`, even with `--no-daemon`, and the Kotlin compiler reports `Failed connecting to the daemon`. Testcontainers inside a container connects to the default gateway (`172.17.0.1`) and cannot reach the containers it starts. Set both variables on the pool:
+
+```toml
+[pools.env]
+JAVA_TOOL_OPTIONS = "-Djava.net.preferIPv4Stack=true"
+TESTCONTAINERS_HOST_OVERRIDE = "127.0.0.1"
+```
+
+`JAVA_TOOL_OPTIONS` reaches every JVM, including the Gradle client, the daemon, the Kotlin compiler daemon and test workers. Each JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` to standard error. Setting only `GRADLE_OPTS` covers the Gradle client but not the Kotlin compiler daemon. Native Windows uses the same Docker Desktop VM but was not checked.
+
 ### Windows in Command Prompt or PowerShell
 
 1. Install Docker Desktop 4.30 or later with the WSL 2 backend and keep it in Linux containers mode.

@@ -86,6 +86,33 @@ pub struct Pool {
     pub cpus: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    /// Environment variables for the runner containers. Jobs on the runner inherit them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+/// Variables the manager passes to every runner container for registration and the workspace.
+pub const RESERVED_ENV: [&str; 8] = [
+    "GITHUB_ORG",
+    "GITHUB_URL",
+    "RUNNER_GROUP",
+    "RUNNER_LABELS",
+    "RUNNER_NAME",
+    "RUNNER_ROOT",
+    "RUNNER_SCOPE",
+    "RUNNER_UID",
+];
+fn valid_env_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !s.as_bytes()[0].is_ascii_digit()
+}
+/// Parses `KEY=VALUE` from the command line. The value may be empty or contain `=`.
+pub fn parse_env(entry: &str) -> Result<(String, String)> {
+    let (key, value) = entry
+        .split_once('=')
+        .context("environment variables must use KEY=VALUE")?;
+    Ok((key.into(), value.into()))
 }
 impl Pool {
     pub fn target(&self) -> &str {
@@ -281,6 +308,20 @@ impl Config {
                 "invalid runner group"
             );
             validate_image(&p.image)?;
+            for (key, value) in &p.env {
+                ensure!(
+                    valid_env_name(key),
+                    "invalid environment variable name: {key}"
+                );
+                ensure!(
+                    !RESERVED_ENV.contains(&key.as_str()),
+                    "{key} is set by runnerctl and cannot be overridden"
+                );
+                ensure!(
+                    !value.contains(['\0', '\n', '\r']),
+                    "environment variable {key} must be a single line"
+                );
+            }
         }
         ensure!(
             self.pools
@@ -467,6 +508,7 @@ mod tests {
             allow_privilege_escalation: false,
             cpus: None,
             memory: None,
+            env: BTreeMap::new(),
         });
         let mut b = c.pools[0].clone();
         b.name = "build".into();
@@ -492,6 +534,59 @@ mod tests {
         let text = toml::to_string(&c).unwrap();
         assert!(text.contains("allow_privilege_escalation = true"));
         assert_eq!(Config::parse(&text).unwrap(), c);
+    }
+    #[test]
+    fn pool_env_is_omitted_until_set_and_roundtrips_as_a_table() {
+        let mut c = fixture();
+        let text = toml::to_string(&c).unwrap();
+        assert!(!text.contains("[pools.env]") && !text.contains("env ="));
+        c.pools[0].env = BTreeMap::from([
+            (
+                "JAVA_TOOL_OPTIONS".into(),
+                "-Djava.net.preferIPv4Stack=true".into(),
+            ),
+            ("EMPTY".into(), String::new()),
+        ]);
+        let text = toml::to_string(&c).unwrap();
+        assert!(text.contains("JAVA_TOOL_OPTIONS = \"-Djava.net.preferIPv4Stack=true\""));
+        assert_eq!(Config::parse(&text).unwrap(), c);
+        let inline = toml::to_string(&fixture())
+            .unwrap()
+            .replace("replicas = 4\n", "replicas = 4\nenv = { A = \"1\" }\n");
+        assert_eq!(Config::parse(&inline).unwrap().pools[0].env["A"], "1");
+    }
+    #[test]
+    fn pool_env_rejects_invalid_names_reserved_names_and_line_breaks() {
+        for (key, value) in [
+            ("", "x"),
+            ("1ST", "x"),
+            ("WITH-DASH", "x"),
+            ("WITH SPACE", "x"),
+            ("RUNNER_NAME", "x"),
+            ("GITHUB_URL", "x"),
+            ("MULTI", "a\nb"),
+            ("CARRIAGE", "a\rb"),
+            ("NUL", "a\0b"),
+        ] {
+            let mut c = fixture();
+            c.pools[0].env.insert(key.into(), value.into());
+            assert!(
+                c.validate().is_err(),
+                "{key:?}={value:?} should be rejected"
+            );
+        }
+        let mut c = fixture();
+        c.pools[0].env.insert("_lower_ok2".into(), "a=b c".into());
+        c.validate().unwrap();
+    }
+    #[test]
+    fn env_entries_split_at_the_first_equals_sign() {
+        assert_eq!(
+            parse_env("A=b=c").unwrap(),
+            ("A".to_string(), "b=c".to_string())
+        );
+        assert_eq!(parse_env("A=").unwrap(), ("A".to_string(), String::new()));
+        assert!(parse_env("A").is_err());
     }
     #[test]
     fn reject_ambiguous_and_unsafe_config() {

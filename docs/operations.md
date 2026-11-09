@@ -14,7 +14,7 @@ Manual edits take effect after `config apply`. Other configuration edits are rej
 
 `replicas` includes busy runners. New pools start stopped; scaling a stopped pool does not start it. The sum of configured replicas, including stopped pools, cannot exceed `max_runners`. Creating runners and pending cleanup count toward actual capacity. Provisioning is serialized; the legacy `max_parallel_creates` setting does not enable parallel creation.
 
-Organization and repository pools can coexist. Set exactly one of `organization` or `repository = "OWNER/REPO"`. Repository pools use GitHub's repository runner endpoints and do not support custom runner groups. Changing scope or authentication profile requires the old pool to be stopped and completely cleaned up. Image, label, group, Docker access, CPU, or memory changes create a new runner generation.
+Organization and repository pools can coexist. Set exactly one of `organization` or `repository = "OWNER/REPO"`. Repository pools use GitHub's repository runner endpoints and do not support custom runner groups. Changing scope or authentication profile requires the old pool to be stopped and completely cleaned up. Image, label, group, Docker access, CPU, memory, or environment changes create a new runner generation.
 
 `cpus = 2.0` and `memory = "2g"` set limits on each runner container. Memory accepts an integer byte count or b/k/m/g suffix (binary multiples); the minimum is 6 MiB. These limits do not constrain sibling containers or the host Docker daemon. Use workflow container/service `options` for their limits.
 
@@ -86,6 +86,8 @@ Custom entrypoints must:
 - Include `/bin/sh`, `chown`, and `chmod`. When a job leaves root-owned workspace files, the manager uses the same image in a temporary container to restore ownership before removing that run's directory. This helper has no network or Docker socket and mounts only the stopped runner's directory.
 
 `allow_privilege_escalation = true` drops `no-new-privileges` from that pool's runner containers only; cleanup helpers keep it. Jobs can then become root inside their runner container. Without `docker_socket` this stays inside the container; with it, the pool is already host-root equivalent. Changing the setting creates a new runner generation.
+
+`env` sets environment variables on a pool's runner containers, as a `[pools.env]` table or with `pool add --env KEY=VALUE` (repeatable). The runner passes them to the shell and action steps of its jobs; steps in a `container:` job and the containers that jobs start do not get them. A workflow or step `env` with the same name takes precedence. Names are letters, digits and underscores, not starting with a digit, and values are single lines. runnerctl rejects the names it sets for registration and the workspace: `GITHUB_ORG`, `GITHUB_URL`, `RUNNER_GROUP`, `RUNNER_LABELS`, `RUNNER_NAME`, `RUNNER_ROOT`, `RUNNER_SCOPE` and `RUNNER_UID`. Values are stored in the config file and visible to `docker inspect`, so do not put secrets in them. Changing the table creates a new runner generation.
 
 With `docker_socket = true`, the runner receives the host Docker socket and host network. This is for trusted workflows. Pool labels are routing hints; use GitHub runner groups/repository policies for access control. Shared Docker access allows control over the host and other pools.
 

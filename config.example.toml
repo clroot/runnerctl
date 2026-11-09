@@ -39,6 +39,9 @@ docker_socket = true
 # allow_privilege_escalation = true # Let jobs use sudo (e.g. apt-get, playwright --with-deps).
 cpus = 2.0
 memory = "2g" # Applies to runners, not sibling job/service containers.
+# Environment for the runners and the jobs they run. Keep this table after the pool's other keys.
+# [pools.env]
+# JAVA_TOOL_OPTIONS = "-Djava.net.preferIPv4Stack=true" # JVM builds on Docker Desktop; see docs/platforms.md.
 
 [[pools]]
 name = "repository-test"

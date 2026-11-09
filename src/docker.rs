@@ -200,6 +200,10 @@ impl Docker {
         ] {
             args.extend(["--env".into(), format!("{key}={value}")]);
         }
+        // Validation keeps these from replacing the variables the manager sets.
+        for (key, value) in &run.pool.env {
+            args.extend(["--env".into(), format!("{key}={value}")]);
+        }
         args.extend(["--env".into(), format!("GITHUB_URL={}", run.pool.url())]);
         if run.pool.repository.is_some() {
             args.extend(["--env".into(), "RUNNER_SCOPE=repo".into()]);
@@ -369,7 +373,7 @@ impl Docker {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Pool;
@@ -391,6 +395,7 @@ mod tests {
                 allow_privilege_escalation,
                 cpus: None,
                 memory: None,
+                env: Default::default(),
             },
             generation: 1,
             created_at: 0,
@@ -415,6 +420,25 @@ mod tests {
         let allowed = Docker::create_args("manager", &run(true), &paths).unwrap();
         assert!(!allowed.iter().any(|a| a.contains("no-new-privileges")));
     }
+    #[test]
+    fn pool_env_reaches_runner_containers_as_env_args() {
+        let paths = Paths::new(std::env::temp_dir().join("runnerctl-args-test")).unwrap();
+        let mut run = run(false);
+        run.pool.env.insert(
+            "JAVA_TOOL_OPTIONS".into(),
+            "-Djava.net.preferIPv4Stack=true".into(),
+        );
+        run.pool.env.insert("EMPTY".into(), String::new());
+        let args = Docker::create_args("manager", &run, &paths).unwrap();
+        for entry in [
+            "JAVA_TOOL_OPTIONS=-Djava.net.preferIPv4Stack=true",
+            "EMPTY=",
+        ] {
+            assert!(args.windows(2).any(|w| w == ["--env", entry]), "{entry}");
+        }
+        assert_eq!(args.last().unwrap(), &run.pool.image);
+    }
+    #[cfg(windows)]
     #[test]
     fn windows_paths_map_to_docker_desktop_vm_paths() {
         assert_eq!(
