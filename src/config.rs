@@ -78,6 +78,10 @@ pub struct Pool {
     pub image: String,
     #[serde(default)]
     pub docker_socket: bool,
+    /// Docker network for the runner containers. Unset uses the host network for Docker socket
+    /// pools and Docker's default bridge network otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<Network>,
     /// Let processes in the runner container gain privileges (for example through sudo).
     /// Runner containers otherwise start with `no-new-privileges`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -89,6 +93,12 @@ pub struct Pool {
     /// Environment variables for the runner containers. Jobs on the runner inherit them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    Host,
+    Bridge,
 }
 /// Variables the manager passes to every runner container for registration and the workspace.
 pub const RESERVED_ENV: [&str; 8] = [
@@ -115,6 +125,13 @@ pub fn parse_env(entry: &str) -> Result<(String, String)> {
     Ok((key.into(), value.into()))
 }
 impl Pool {
+    pub fn network(&self) -> Network {
+        self.network.unwrap_or(if self.docker_socket {
+            Network::Host
+        } else {
+            Network::Bridge
+        })
+    }
     pub fn target(&self) -> &str {
         self.repository.as_deref().unwrap_or(&self.organization)
     }
@@ -505,6 +522,7 @@ mod tests {
             replicas: 4,
             image: default_image(),
             docker_socket: false,
+            network: None,
             allow_privilege_escalation: false,
             cpus: None,
             memory: None,
@@ -554,6 +572,20 @@ mod tests {
             .unwrap()
             .replace("replicas = 4\n", "replicas = 4\nenv = { A = \"1\" }\n");
         assert_eq!(Config::parse(&inline).unwrap().pools[0].env["A"], "1");
+    }
+    #[test]
+    fn network_defaults_follow_docker_socket_and_explicit_values_roundtrip() {
+        let mut c = fixture();
+        assert_eq!(c.pools[0].network(), Network::Bridge);
+        c.pools[0].docker_socket = true;
+        assert_eq!(c.pools[0].network(), Network::Host);
+        assert!(!toml::to_string(&c).unwrap().contains("network"));
+        c.pools[0].network = Some(Network::Bridge);
+        assert_eq!(c.pools[0].network(), Network::Bridge);
+        let text = toml::to_string(&c).unwrap();
+        assert!(text.contains("network = \"bridge\""));
+        assert_eq!(Config::parse(&text).unwrap(), c);
+        assert!(Config::parse(&text.replace("\"bridge\"", "\"overlay\"")).is_err());
     }
     #[test]
     fn pool_env_rejects_invalid_names_reserved_names_and_line_breaks() {

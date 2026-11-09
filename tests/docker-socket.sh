@@ -4,6 +4,8 @@ set -euo pipefail
 # runner reaches the daemon through the mounted socket, and a sibling container sees the
 # runner's workspace at the same host path, as container jobs and workspace binds require.
 image="${RUNNER_IMAGE:-local/runnerctl-test-base:1}"
+# The runner network: host by default, as for Docker socket pools; bridge for network = "bridge".
+network="${RUNNER_NETWORK:-host}"
 # Use the home directory like the default --home; Docker Desktop shares it with its VM.
 root="$(mktemp -d "$HOME/.runnerctl-socket-test.XXXXXX")"
 cleanup() {
@@ -19,7 +21,7 @@ printf '%s' test-token > "$root/token"
 chmod 600 "$root/token"
 # Copy the container script into the shared directory: the repository may not be shared.
 cp "$(dirname "$0")/docker-socket-runner.sh" "$root/socket-test.sh"
-docker run --rm --init --network host --security-opt no-new-privileges:true \
+docker run --rm --init --network "$network" --security-opt no-new-privileges:true \
   -e GITHUB_ORG=test-org -e RUNNER_NAME=socket-test -e RUNNER_LABELS=test \
   -e RUNNER_ROOT="$root/runtime" -e RUNNER_UID="$(id -u)" -e SIBLING_IMAGE="$image" \
   -v "$root:/run/runnerctl" -v "$root/runtime:$root/runtime" \

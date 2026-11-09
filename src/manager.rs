@@ -369,6 +369,7 @@ impl Engine {
                             || old.labels != new.labels
                             || old.runner_group != new.runner_group
                             || old.docker_socket != new.docker_socket
+                            || old.network() != new.network()
                             || old.allow_privilege_escalation != new.allow_privilege_escalation
                             || old.cpus != new.cpus
                             || old.memory != new.memory
@@ -1161,6 +1162,7 @@ mod tests {
                 replicas,
                 image: config::default_image(),
                 docker_socket: false,
+                network: None,
                 allow_privilege_escalation: false,
                 cpus: None,
                 memory: None,
@@ -1446,6 +1448,26 @@ mod tests {
             .unwrap();
         assert_eq!(e.state.pools["validate"].generation, before + 1);
         assert_eq!(e.state.config.pools[0].env, c.pools[0].env);
+    }
+    #[tokio::test]
+    async fn only_effective_network_changes_start_a_new_runner_generation() {
+        let (_dir, mut e) = fixture();
+        let before = e.state.pools["validate"].generation;
+        let mut c = e.state.config.clone();
+        c.pools[0].network = Some(config::Network::Bridge);
+        let text = toml::to_string(&c).unwrap();
+        config::atomic_write(&e.paths.config(), text.as_bytes()).unwrap();
+        e.handle(Request::Apply { text, revision: 1 })
+            .await
+            .unwrap();
+        assert_eq!(e.state.pools["validate"].generation, before);
+        c.pools[0].network = Some(config::Network::Host);
+        let text = toml::to_string(&c).unwrap();
+        config::atomic_write(&e.paths.config(), text.as_bytes()).unwrap();
+        e.handle(Request::Apply { text, revision: 2 })
+            .await
+            .unwrap();
+        assert_eq!(e.state.pools["validate"].generation, before + 1);
     }
     #[tokio::test]
     async fn organization_change_requires_fully_stopped_pool() {
