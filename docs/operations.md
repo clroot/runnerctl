@@ -14,7 +14,7 @@ Manual edits take effect after `config apply`. Other configuration edits are rej
 
 `replicas` includes busy runners. New pools start stopped; scaling a stopped pool does not start it. The sum of configured replicas, including stopped pools, cannot exceed `max_runners`. Creating runners and pending cleanup count toward actual capacity. Provisioning is serialized; the legacy `max_parallel_creates` setting does not enable parallel creation.
 
-Organization and repository pools can coexist. Set exactly one of `organization` or `repository = "OWNER/REPO"`. Repository pools use GitHub's repository runner endpoints and do not support custom runner groups. Changing scope or authentication profile requires the old pool to be stopped and completely cleaned up. Image, label, group, Docker access, CPU, or memory changes create a new runner generation.
+Organization and repository pools can coexist. Set exactly one of `organization` or `repository = "OWNER/REPO"`. Repository pools use GitHub's repository runner endpoints and do not support custom runner groups. Changing scope or authentication profile requires the old pool to be stopped and completely cleaned up. Image, label, group, Docker access, CPU, memory, or environment changes create a new runner generation.
 
 `cpus = 2.0` and `memory = "2g"` set limits on each runner container. Memory accepts an integer byte count or b/k/m/g suffix (binary multiples); the minimum is 6 MiB. These limits do not constrain sibling containers or the host Docker daemon. Use workflow container/service `options` for their limits.
 
