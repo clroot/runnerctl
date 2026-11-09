@@ -1,4 +1,7 @@
-use crate::{config::Paths, state::Run};
+use crate::{
+    config::{Network, Paths},
+    state::Run,
+};
 use anyhow::{Context, Result, anyhow, ensure};
 use serde_json::Value;
 use std::{io::Write, path::Path, time::Duration};
@@ -214,10 +217,12 @@ impl Docker {
             "--volume".into(),
             format!("{}:/run/runnerctl:Z", bootstrap.display()),
         ]);
-        if run.pool.docker_socket {
+        if run.pool.network() == Network::Host {
             // Services in non-container jobs are reached via localhost, just as
             // on a bare-metal runner. The shared daemon is already a host trust boundary.
             args.extend(["--network".into(), "host".into()]);
+        }
+        if run.pool.docker_socket {
             // The host daemon must see the same runtime/workspace paths as the runner.
             let runtime = bootstrap.join("runtime");
             let shared = daemon_path(&runtime)?;
@@ -392,6 +397,7 @@ mod tests {
                 replicas: 1,
                 image: crate::config::default_image(),
                 docker_socket: false,
+                network: None,
                 allow_privilege_escalation,
                 cpus: None,
                 memory: None,
@@ -419,6 +425,30 @@ mod tests {
         );
         let allowed = Docker::create_args("manager", &run(true), &paths).unwrap();
         assert!(!allowed.iter().any(|a| a.contains("no-new-privileges")));
+    }
+    #[test]
+    fn docker_socket_pools_use_the_host_network_unless_set_to_bridge() {
+        let paths = Paths::new(std::env::temp_dir().join("runnerctl-args-test")).unwrap();
+        let host = |run: &Run| {
+            Docker::create_args("manager", run, &paths)
+                .unwrap()
+                .windows(2)
+                .any(|w| w == ["--network", "host"])
+        };
+        let mut run = run(false);
+        assert!(!host(&run));
+        run.pool.network = Some(Network::Host);
+        assert!(host(&run));
+        run.pool.network = None;
+        run.pool.docker_socket = true;
+        assert!(host(&run));
+        run.pool.network = Some(Network::Bridge);
+        let args = Docker::create_args("manager", &run, &paths).unwrap();
+        assert!(!args.iter().any(|a| a == "--network"));
+        assert!(
+            args.iter()
+                .any(|a| a == "/var/run/docker.sock:/var/run/docker.sock")
+        );
     }
     #[test]
     fn pool_env_reaches_runner_containers_as_env_args() {

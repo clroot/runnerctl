@@ -165,6 +165,9 @@ enum PoolCmd {
         image: String,
         #[arg(long)]
         docker_socket: bool,
+        /// Docker network for runner containers [default: host with --docker-socket, bridge otherwise]
+        #[arg(long, value_enum)]
+        network: Option<config::Network>,
         /// Allow processes in runner containers to gain privileges, for example through sudo
         #[arg(long)]
         allow_privilege_escalation: bool,
@@ -378,6 +381,7 @@ async fn run() -> Result<()> {
                 runner_group,
                 image,
                 docker_socket,
+                network,
                 allow_privilege_escalation,
                 cpus,
                 memory,
@@ -393,6 +397,7 @@ async fn run() -> Result<()> {
                     runner_group,
                     image,
                     docker_socket,
+                    network,
                     allow_privilege_escalation,
                     cpus,
                     memory,

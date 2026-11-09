@@ -62,15 +62,18 @@ The same Docker socket notes as on macOS apply: Docker Desktop maps workspace pa
 
 #### Java and Gradle builds
 
-With host networking on, Docker Desktop 4.95.0 (WSL2 backend) does not route a JVM's connection to `127.0.0.1` inside a host-network runner. Java opens IPv6 sockets and connects to the IPv4-mapped address, so a JVM cannot reach a port that another process in the same runner listens on, although other programs can. Gradle fails with `Could not connect to the Gradle daemon`, even with `--no-daemon`, and the Kotlin compiler reports `Failed connecting to the daemon`. Testcontainers inside a container connects to the default gateway (`172.17.0.1`) and cannot reach the containers it starts. Set both variables on the pool:
+With host networking on, Docker Desktop 4.95.0 (WSL2 backend) does not route a JVM's connection to `127.0.0.1` inside a host-network runner. Java opens IPv6 sockets and connects to the IPv4-mapped address, so a JVM cannot reach a port that another process in the same runner listens on, although other programs can. Gradle fails with `Could not connect to the Gradle daemon`, even with `--no-daemon`, and its worker processes and the Kotlin compiler daemon fail the same way.
+
+`JAVA_TOOL_OPTIONS=-Djava.net.preferIPv4Stack=true` is not enough: Gradle starts worker daemons, which plugins such as ktlint use, without the build's environment variables. Run JVM builds on a bridge-network pool instead, and let Testcontainers reach the ports it publishes through Docker Desktop's host name:
 
 ```toml
+network = "bridge"
+
 [pools.env]
-JAVA_TOOL_OPTIONS = "-Djava.net.preferIPv4Stack=true"
-TESTCONTAINERS_HOST_OVERRIDE = "127.0.0.1"
+TESTCONTAINERS_HOST_OVERRIDE = "host.docker.internal"
 ```
 
-`JAVA_TOOL_OPTIONS` reaches every JVM, including the Gradle client, the daemon, the Kotlin compiler daemon and test workers. Each JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` to standard error. Setting only `GRADLE_OPTS` covers the Gradle client but not the Kotlin compiler daemon. Native Windows uses the same Docker Desktop VM but was not checked.
+Without the override, Testcontainers connects to the bridge gateway (`172.17.0.1`), where Docker Desktop does not publish container ports. On such a pool, a Gradle build with ktlint workers, the Kotlin compiler daemon and a Testcontainers MariaDB test passed. Jobs on it cannot reach `services:` through `localhost`. Native Windows uses the same Docker Desktop VM but was not checked.
 
 ### Windows in Command Prompt or PowerShell
 
