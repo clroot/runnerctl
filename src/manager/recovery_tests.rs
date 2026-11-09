@@ -194,6 +194,7 @@ fn fixture() -> anyhow::Result<(tempfile::TempDir, Engine)> {
         allow_privilege_escalation: false,
         cpus: None,
         memory: None,
+        env: Default::default(),
     });
     config::atomic_write(&paths.config(), toml::to_string(&config)?.as_bytes())?;
     Ok((dir, Engine::open(paths)?))

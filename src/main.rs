@@ -174,6 +174,9 @@ enum PoolCmd {
         /// Memory limit for each runner container (for example 2g or 512m)
         #[arg(long)]
         memory: Option<String>,
+        /// Environment variable for runner containers and their jobs, as KEY=VALUE (repeatable)
+        #[arg(long = "env", value_name = "KEY=VALUE", value_parser = config::parse_env)]
+        env: Vec<(String, String)>,
     },
     List,
     Show {
@@ -378,6 +381,7 @@ async fn run() -> Result<()> {
                 allow_privilege_escalation,
                 cpus,
                 memory,
+                env,
             } => Request::Add {
                 pool: Pool {
                     name,
@@ -392,6 +396,7 @@ async fn run() -> Result<()> {
                     allow_privilege_escalation,
                     cpus,
                     memory,
+                    env: env.into_iter().collect(),
                 },
             },
             PoolCmd::List => Request::Status { pool: None },
