@@ -215,3 +215,11 @@ fn init_accepts_an_empty_state_database() {
     cmd(h).args(["init", "--org", "example"]).assert().failure();
     cmd(h).args(["start", "--all"]).assert().success();
 }
+
+#[test]
+fn cli_tui_requires_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = cmd(dir.path()).arg("tui").output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("needs an interactive terminal"));
+}

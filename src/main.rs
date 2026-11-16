@@ -10,6 +10,7 @@ mod manager;
 mod protocol;
 mod service;
 mod state;
+mod tui;
 #[cfg(windows)]
 mod windows;
 
@@ -95,6 +96,8 @@ enum Cmd {
         follow: bool,
     },
     Doctor,
+    /// Open an interactive dashboard for pools and runners
+    Tui,
 }
 #[derive(Subcommand)]
 enum ImageCmd {
@@ -278,6 +281,7 @@ async fn run() -> Result<()> {
             return Ok(());
         }
         Cmd::Manager => return manager::serve(paths).await,
+        Cmd::Tui => return tui::run(paths).await,
         Cmd::Image {
             command: ImageCmd::Pull { image },
         } => {
