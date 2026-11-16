@@ -19,7 +19,7 @@ jobs:
     runs-on: [self-hosted, '${{ inputs.runner_label }}']
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Checkout, shell, and non-root execution
         run: |
           test -f README.md
@@ -30,7 +30,7 @@ jobs:
     runs-on: [self-hosted, '${{ inputs.runner_label }}']
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Buildx and workspace bind mounts
         env:
           TEST_TAG: runnerctl-smoke:${{ github.run_id }}-${{ github.run_attempt }}
@@ -84,7 +84,7 @@ jobs:
           POSTGRES_PASSWORD: test-only-password
         options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10 --memory 256m
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: JavaScript action runtime, workspace, and service DNS
         run: |
           test -f README.md
