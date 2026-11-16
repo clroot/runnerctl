@@ -71,7 +71,7 @@ jobs:
   smoke:
     runs-on: [self-hosted, 'pool:ci', ci]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: echo 'runnerctl is ready'
 ```
 
