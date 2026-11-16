@@ -94,6 +94,8 @@ runnerctl pool remove ci --wait --timeout 5m
 
 **Normal stop drains runners.** Replacements stop immediately, busy jobs finish, and idle runners can accept one final job before removal. `--wait` waits for cleanup; its timeout never escalates to cancellation. Use `--force` when you explicitly want to terminate existing work. Status explains whether draining runners are waiting for a job, finishing a job, or awaiting cleanup.
 
+`runnerctl tui` opens a terminal dashboard that works over SSH too. It refreshes pool and runner status every second and lets you start, stop, and scale the selected pool, follow a runner's logs, and run doctor checks. Stopping asks for confirmation. Press `?` for the keys. When the manager is stopped, the dashboard shows the saved state and picks up live status again once the manager starts.
+
 To enable Docker builds, job containers, and services, create a pool with `--docker-socket`. The provided image shares the host network and maps its runtime/workspace to matching host paths. This requires trusted workflows. Check the [workflow compatibility matrix](docs/compatibility.md).
 
 ```bash

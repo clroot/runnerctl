@@ -27,6 +27,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
+ratatui = "0.29"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
