@@ -38,6 +38,23 @@ fn cli_multi_pool_offline_lifecycle() {
     assert_eq!(value["pools"][0]["intent"], "running");
     assert_eq!(value["pools"][1]["intent"], "stopped");
     assert_eq!(value["pools"][1]["replicas"], 3);
+    let out = cmd(h)
+        .args(["--json", "restart", "build"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["restarted"][0], "build");
+    assert_eq!(value["mode"], "drain");
+    let out = cmd(h).args(["--json", "status"]).output().unwrap();
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["pools"][1]["intent"], "running");
+    cmd(h).args(["restart"]).assert().failure();
+    cmd(h)
+        .args(["restart", "build", "--all"])
+        .assert()
+        .failure();
+    cmd(h).args(["stop", "build"]).assert().success();
     cmd(h).args(["stop"]).assert().failure();
     cmd(h).args(["start", "build", "--all"]).assert().failure();
     cmd(h).args(["scale", "build", "100"]).assert().failure();

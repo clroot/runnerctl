@@ -23,6 +23,7 @@ Organization and repository pools can coexist. Set exactly one of `organization`
 | Command | New replacements | Existing runners |
 | --- | --- | --- |
 | `stop POOL` | Disabled | Finish their next/current job, then clean up |
+| `restart POOL` | Start right away with a new generation; backoff cleared | Every runner drains (`--force` terminates them) |
 | `scale POOL N` | Maintain N when running | Excess runners drain |
 | `upgrade --pool POOL --image IMAGE` | Use the new image | Previous generation drains |
 | `pool remove POOL` | Disabled | Drain and delete the pool after cleanup |
@@ -30,7 +31,7 @@ Organization and repository pools can coexist. Set exactly one of `organization`
 
 Idle runners can accept one more job during drain. A GitHub idle observation cannot eliminate the race with job assignment, so the manager does not force-kill on that observation. Status reports `waiting_for_next_job`, `job_in_progress`, or `awaiting_observation_or_cleanup` for draining runners.
 
-`stop` and `pool remove` support `--wait --timeout 5m`. The timeout ends only the CLI wait, leaving the recorded intent intact. It never adds a forced stop. A running manager is required to make cleanup progress. `--force --wait` waits for both container and registration cleanup; a GitHub outage can delay the latter. Forced interruption of a workflow can leave containers created by that workflow on the shared daemon.
+`stop`, `restart` and `pool remove` support `--wait --timeout 5m`. `restart --wait` finishes when no runner from before the restart remains and the target count is idle or busy. The timeout ends only the CLI wait, leaving the recorded intent intact. It never adds a forced stop. A running manager is required to make cleanup progress. `--force --wait` waits for both container and registration cleanup; a GitHub outage can delay the latter. Forced interruption of a workflow can leave containers created by that workflow on the shared daemon.
 
 ## Recovery and responsiveness
 
@@ -42,7 +43,7 @@ Observation errors produce `unknown` instead of deleting a live container. Faile
 
 GitHub rate limits and authentication failures pause every pool that shares the credential. Other GitHub API errors back off only the affected pool. After a repository is renamed or transferred, the manager can still observe, clean up and remove the pool's existing runners: GitHub's API redirects are followed, but only within the API origin, so the token is never sent to another host. New runners cannot register under the old name: stop the pool with `--wait`, then change `repository` and run `config apply`, or remove the pool and add it again.
 
-A live but unresponsive runner can remain unknown. Inspect diagnostics, then explicitly stop with `--force` and restart if needed. No timeout automatically cancels work.
+A live but unresponsive runner can remain unknown. Inspect diagnostics, then explicitly replace it with `restart --force`, or stop with `--force`. No timeout automatically cancels work.
 
 ## Logs
 
