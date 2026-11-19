@@ -259,6 +259,32 @@ impl Engine {
                     json!({"stopped":targets,"pending":pending,"mode":if force {"force"} else {"drain"},"message":if force {"Termination requested; running jobs may be interrupted. Registration cleanup waits for GitHub connectivity."} else {"Replacements disabled. Existing idle runners can still accept one job before removal; busy jobs finish naturally. Use --wait to watch cleanup, or --force to terminate work."}}),
                 )
             }
+            Request::Restart { pool, all, force } => {
+                let targets = self.targets(pool, all)?;
+                ensure!(
+                    targets.iter().all(|n| !self.state.pools[n].deleting),
+                    "a target pool is being deleted"
+                );
+                for name in &targets {
+                    let p = self.state.pools.get_mut(name).unwrap();
+                    p.running = true;
+                    p.retry_at = 0;
+                    p.failures = 0;
+                    p.error = None;
+                    // A new generation retires every existing runner; replacements use it.
+                    p.generation += 1;
+                    let id = p.id.clone();
+                    for r in self.state.runs.values_mut().filter(|r| r.pool_id == id) {
+                        r.retiring = true;
+                        r.force |= force;
+                    }
+                }
+                self.github.clear();
+                self.save()?;
+                Ok(
+                    json!({"restarted":targets,"mode":if force {"force"} else {"drain"},"message":if force {"Restart requested; existing runners are terminated and running jobs may be interrupted. Replacements start right away."} else {"Restart requested. Existing idle runners can still accept one job and busy jobs finish before replacement. Use --wait to watch the replacement, or --force to terminate work."}}),
+                )
+            }
             Request::Scale { pool, replicas } => {
                 let mut next = self.state.config.clone();
                 let p = next
@@ -1379,6 +1405,62 @@ mod tests {
         assert!(e.state.pools["validate"].running);
         assert!(!e.state.pools["build"].running);
         assert_eq!(e.state.config.pools[1].replicas, 3);
+    }
+    #[tokio::test]
+    async fn restart_starts_pools_resets_backoff_and_retires_runners() {
+        let (_dir, mut e) = fixture();
+        let mut run = test_run(&e, 0, "busy");
+        run.generation = e.state.pools["validate"].generation;
+        e.state.runs.insert(run.id.clone(), run.clone());
+        let p = e.state.pools.get_mut("validate").unwrap();
+        p.failures = 3;
+        p.retry_at = now() + 600;
+        p.error = Some("boom".into());
+        e.save().unwrap();
+        let before = e.state.pools["validate"].generation;
+        let reply = e
+            .handle(Request::Restart {
+                pool: Some("validate".into()),
+                all: false,
+                force: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply["restarted"], json!(["validate"]));
+        assert_eq!(reply["mode"], "drain");
+        let p = &e.state.pools["validate"];
+        assert!(p.running);
+        assert_eq!((p.failures, p.retry_at, p.error.clone()), (0, 0, None));
+        assert_eq!(p.generation, before + 1);
+        let r = &e.state.runs[&run.id];
+        assert!(r.retiring && !r.force);
+        assert!(!e.state.pools["build"].running);
+
+        e.handle(Request::Restart {
+            pool: None,
+            all: true,
+            force: true,
+        })
+        .await
+        .unwrap();
+        assert!(e.state.pools.values().all(|p| p.running));
+        assert!(e.state.runs[&run.id].force);
+
+        e.handle(Request::Remove {
+            pool: "build".into(),
+            force: false,
+        })
+        .await
+        .unwrap();
+        assert!(
+            e.handle(Request::Restart {
+                pool: None,
+                all: true,
+                force: false,
+            })
+            .await
+            .is_err()
+        );
     }
     #[tokio::test]
     async fn rejected_changes_preserve_state_and_file() {

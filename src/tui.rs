@@ -398,6 +398,21 @@ impl App {
                     });
                 }
             }
+            KeyCode::Char('R') => {
+                if let Some(name) = self.pool().map(|p| p.name.clone()) {
+                    self.overlay = Some(Overlay::Confirm {
+                        prompt: format!(
+                            "Restart pool '{name}'? Every runner is replaced after its current or next job; stopped pools start."
+                        ),
+                        request: Request::Restart {
+                            pool: Some(name.clone()),
+                            all: false,
+                            force: false,
+                        },
+                        label: format!("restart {name}"),
+                    });
+                }
+            }
             KeyCode::Char('+' | '=') => return self.scale(true),
             KeyCode::Char('-') => return self.scale(false),
             KeyCode::Enter | KeyCode::Char('l') => return self.open_logs(),
@@ -915,6 +930,7 @@ fn draw_help(f: &mut Frame) {
         ("s", "Start the selected pool"),
         ("x", "Stop the selected pool (busy jobs finish)"),
         ("X", "Force stop (running jobs may be interrupted)"),
+        ("R", "Restart: replace every runner (busy jobs finish)"),
         ("+ / -", "Change the pool's target runner count"),
         ("l / Enter", "Show logs for the selected runner"),
         ("d", "Run doctor checks"),
@@ -1105,6 +1121,17 @@ mod tests {
         assert!(matches!(
             changed(&tasks),
             Request::Stop { pool: Some(p), all: false, force: true } if p == "a"
+        ));
+    }
+
+    #[test]
+    fn restart_requires_confirmation() {
+        let mut app = loaded(&["a"]);
+        assert!(app.on_key(key('R')).is_empty());
+        let tasks = app.on_key(key('y'));
+        assert!(matches!(
+            changed(&tasks),
+            Request::Restart { pool: Some(p), all: false, force: false } if p == "a"
         ));
     }
 

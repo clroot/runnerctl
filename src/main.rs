@@ -78,6 +78,16 @@ enum Cmd {
         #[command(flatten)]
         wait: WaitArgs,
     },
+    /// Replace every runner of a pool, starting it if stopped
+    Restart {
+        #[command(flatten)]
+        target: Target,
+        /// Terminate existing runners now; running jobs may be interrupted
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
     Scale {
         pool: String,
         replicas: u32,
@@ -111,7 +121,7 @@ enum ImageCmd {
 }
 #[derive(Args)]
 struct WaitArgs {
-    /// Wait for all target runners and registrations to be cleaned up
+    /// Wait for cleanup (stop, pool remove) or for replacement runners to come online (restart)
     #[arg(long)]
     wait: bool,
     /// Stop waiting after this duration; never force-cancel jobs on timeout
@@ -239,7 +249,7 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::new(cli.home.unwrap_or_else(config::default_home))?;
     paths.prepare()?;
-    let mut waiting: Option<(Vec<String>, bool, Duration)> = None;
+    let mut waiting: Option<(Vec<String>, Goal, Duration)> = None;
     let request = match cli.command {
         Cmd::Init { org, repo } => {
             let _lock = manager::lock(&paths)?;
@@ -415,7 +425,7 @@ async fn run() -> Result<()> {
             PoolCmd::Show { name } => Request::Status { pool: Some(name) },
             PoolCmd::Remove { name, force, wait } => {
                 if wait.wait {
-                    waiting = Some((vec![name.clone()], true, wait.timeout));
+                    waiting = Some((vec![name.clone()], Goal::Removed, wait.timeout));
                 }
                 Request::Remove { pool: name, force }
             }
@@ -461,19 +471,21 @@ async fn run() -> Result<()> {
             wait,
         } => {
             if wait.wait {
-                let targets = if all {
-                    dispatch(&paths, Request::Status { pool: None }).await?["pools"]
-                        .as_array()
-                        .context("missing pools")?
-                        .iter()
-                        .filter_map(|p| p["name"].as_str().map(str::to_owned))
-                        .collect()
-                } else {
-                    vec![pool.clone().context("missing pool")?]
-                };
-                waiting = Some((targets, false, wait.timeout));
+                let targets = wait_targets(&paths, &pool, all).await?;
+                waiting = Some((targets, Goal::Stopped, wait.timeout));
             }
             Request::Stop { pool, all, force }
+        }
+        Cmd::Restart {
+            target: Target { pool, all },
+            force,
+            wait,
+        } => {
+            if wait.wait {
+                let targets = wait_targets(&paths, &pool, all).await?;
+                waiting = Some((targets, Goal::Replaced, wait.timeout));
+            }
+            Request::Restart { pool, all, force }
         }
         Cmd::Scale { pool, replicas } => Request::Scale { pool, replicas },
         Cmd::Upgrade { pool, image } => Request::Upgrade { pool, image },
@@ -506,7 +518,7 @@ async fn run() -> Result<()> {
         }
     };
     let mut data = dispatch(&paths, request).await?;
-    if let Some((targets, removed, timeout)) = waiting {
+    if let Some((targets, goal, timeout)) = waiting {
         if !cli.json {
             eprintln!(
                 "{}",
@@ -517,9 +529,16 @@ async fn run() -> Result<()> {
             data["manager_running"] != false,
             "request saved, but manager is stopped; start the manager before waiting for cleanup"
         );
-        wait_for_cleanup(&paths, &targets, removed, timeout).await?;
+        wait_for(&paths, &targets, goal, timeout).await?;
         data["pending"] = Value::Bool(false);
-        data["message"] = Value::String("Cleanup complete.".into());
+        data["message"] = Value::String(
+            if goal == Goal::Replaced {
+                "Restart complete."
+            } else {
+                "Cleanup complete."
+            }
+            .into(),
+        );
     }
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&data)?);
@@ -606,12 +625,49 @@ async fn run() -> Result<()> {
     ensure!(data["healthy"] != false, "doctor found failed checks");
     Ok(())
 }
-async fn wait_for_cleanup(
-    paths: &Paths,
-    targets: &[String],
-    removed: bool,
-    timeout: Duration,
-) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Goal {
+    /// The pool has no active runners.
+    Stopped,
+    /// The pool no longer exists.
+    Removed,
+    /// Runners from before the restart are gone and the target count is online.
+    Replaced,
+}
+async fn wait_targets(paths: &Paths, pool: &Option<String>, all: bool) -> Result<Vec<String>> {
+    Ok(if all {
+        dispatch(paths, Request::Status { pool: None }).await?["pools"]
+            .as_array()
+            .context("missing pools")?
+            .iter()
+            .filter_map(|p| p["name"].as_str().map(str::to_owned))
+            .collect()
+    } else {
+        vec![pool.clone().context("missing pool")?]
+    })
+}
+fn reached(pool: Option<&Value>, goal: Goal) -> bool {
+    let Some(p) = pool else {
+        return goal != Goal::Replaced;
+    };
+    match goal {
+        Goal::Stopped => p["active"] == 0,
+        Goal::Removed => false,
+        Goal::Replaced => {
+            let generation = p["generation"].as_u64().unwrap_or(0);
+            let runners = p["runners"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let online = runners
+                .iter()
+                .filter(|r| r["phase"] == "idle" || r["phase"] == "busy")
+                .count() as u64;
+            runners
+                .iter()
+                .all(|r| r["generation"].as_u64().unwrap_or(0) >= generation)
+                && online >= p["replicas"].as_u64().unwrap_or(0)
+        }
+    }
+}
+async fn wait_for(paths: &Paths, targets: &[String], goal: Goal, timeout: Duration) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let status =
@@ -625,12 +681,9 @@ async fn wait_for_cleanup(
             "manager stopped while waiting; cleanup is still pending"
         );
         let pools = status["pools"].as_array().context("missing pools")?;
-        let done = targets.iter().all(|target| {
-            pools
-                .iter()
-                .find(|p| p["name"] == *target)
-                .is_none_or(|p| !removed && p["active"] == 0)
-        });
+        let done = targets
+            .iter()
+            .all(|target| reached(pools.iter().find(|p| p["name"] == *target), goal));
         if done {
             return Ok(());
         }

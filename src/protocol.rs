@@ -20,6 +20,11 @@ pub enum Request {
         all: bool,
         force: bool,
     },
+    Restart {
+        pool: Option<String>,
+        all: bool,
+        force: bool,
+    },
     Scale {
         pool: String,
         replicas: u32,
