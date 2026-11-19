@@ -74,7 +74,7 @@ Existing pools retain their configured images when the CLI is updated. The repos
 
 ## Custom images and Docker workflows
 
-Extend `runner/Dockerfile` or the published image to install additional toolchains. The base includes Ubuntu, Git, curl, jq, Ruby, Docker CLI, Buildx, and Compose. Jobs run as the non-root `runner` user. The image grants that user passwordless `sudo`, as on GitHub-hosted runners, but runner containers start with `no-new-privileges`, which blocks it. Set `allow_privilege_escalation = true` on a pool (or `pool add --allow-privilege-escalation`) to let its jobs use `sudo`, for example for `sudo apt-get install` or `playwright install --with-deps`. It does not mirror the full GitHub-hosted tool cache.
+Extend `runner/Dockerfile` or the published image to install additional toolchains. The base includes Ubuntu, Git, Git LFS, curl, jq, Ruby, Docker CLI, Buildx, and Compose. Jobs run as the non-root `runner` user. The image grants that user passwordless `sudo`, as on GitHub-hosted runners, but runner containers start with `no-new-privileges`, which blocks it. Set `allow_privilege_escalation = true` on a pool (or `pool add --allow-privilege-escalation`) to let its jobs use `sudo`, for example for `sudo apt-get install` or `playwright install --with-deps`. It does not mirror the full GitHub-hosted tool cache.
 
 Custom entrypoints must:
 
