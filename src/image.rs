@@ -59,10 +59,10 @@ pub fn version_check(
     }
     check
 }
-pub async fn pull(image: Option<String>) -> Result<Value> {
+pub async fn pull(image: Option<String>, quiet: bool) -> Result<Value> {
     let image = image.unwrap_or_else(crate::config::default_image);
     crate::config::validate_image(&image)?;
-    Docker::pull(&image).await?;
+    Docker::pull(&image, quiet).await?;
     Ok(
         json!({"pulled":image,"runner_version":Docker::image_version(&image).await?,"bundled_runner_version":runner_version()}),
     )

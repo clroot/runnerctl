@@ -104,6 +104,9 @@ enum ImageCmd {
     Pull {
         #[arg(long)]
         image: Option<String>,
+        /// Do not show Docker pull progress on stderr
+        #[arg(long, short)]
+        quiet: bool,
     },
 }
 #[derive(Args)]
@@ -283,9 +286,9 @@ async fn run() -> Result<()> {
         Cmd::Manager => return manager::serve(paths).await,
         Cmd::Tui => return tui::run(paths).await,
         Cmd::Image {
-            command: ImageCmd::Pull { image },
+            command: ImageCmd::Pull { image, quiet },
         } => {
-            let result = image::pull(image).await?;
+            let result = image::pull(image, quiet).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             return Ok(());
         }

@@ -119,12 +119,21 @@ impl Docker {
             .as_str()
             .map(str::to_owned))
     }
-    pub async fn pull(image: &str) -> Result<()> {
+    /// Pulls `image`, sending Docker's progress to stderr so stdout stays free for results.
+    /// Docker draws its progress bars when stderr is a terminal and prints one line per layer
+    /// state otherwise.
+    pub async fn pull(image: &str, quiet: bool) -> Result<()> {
+        let progress = if quiet {
+            std::process::Stdio::null()
+        } else {
+            eprintln!("Pulling {image}...");
+            std::io::stderr().into()
+        };
         let status = tokio::time::timeout(
             Duration::from_secs(600),
             Command::new("docker")
                 .args(["pull", image])
-                .stdout(std::process::Stdio::null())
+                .stdout(progress)
                 .kill_on_drop(true)
                 .status(),
         )
